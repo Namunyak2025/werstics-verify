@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/Namunyak2025/werstics-verify/backend/internal/api"
+	"github.com/Namunyak2025/werstics-verify/backend/internal/audit"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/auth"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/payments"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/storage/postgres"
@@ -41,10 +42,14 @@ func main() {
 
 	rbacRepository := postgres.NewRBACRepository(pool)
 
+	auditRepository := postgres.NewAuditRepository(pool)
+	auditService := audit.NewService(auditRepository)
+
 	server := api.NewServer(
 		paymentService,
 		authService,
 		rbacRepository,
+		auditService,
 	)
 
 	log.Printf("Werstics Verify API listening on %s", addr)

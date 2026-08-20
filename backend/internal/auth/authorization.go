@@ -6,23 +6,47 @@ import (
 	"net/http"
 )
 
+var ErrForbidden = errors.New("forbidden")
+
 type PermissionChecker interface {
-	HasPermission(ctx context.Context, userID string, permission string) (bool, error)
-	ListPermissions(ctx context.Context, userID string) ([]string, error)
+	HasPermission(
+		ctx context.Context,
+		userID string,
+		permission string,
+	) (bool, error)
+
+	ListPermissions(
+		ctx context.Context,
+		userID string,
+	) ([]string, error)
 }
 
-var ErrForbidden = errors.New("forbidden")
+type AuditRecorder interface {
+	RecordDenied(
+		ctx context.Context,
+		user User,
+		permission string,
+		resourceType string,
+		resourceID string,
+	)
+}
 
 func RequirePermission(
 	checker PermissionChecker,
+	recorder AuditRecorder,
 	permission string,
+	resourceType string,
 	next http.Handler,
 ) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, ok := CurrentUser(r.Context())
 		if !ok {
-			w.Header().Set("WWW-Authenticate", `Bearer`)
-			http.Error(w, "authentication required", http.StatusUnauthorized)
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			http.Error(
+				w,
+				"authentication required",
+				http.StatusUnauthorized,
+			)
 			return
 		}
 
@@ -32,12 +56,30 @@ func RequirePermission(
 			permission,
 		)
 		if err != nil {
-			http.Error(w, "authorization check failed", http.StatusInternalServerError)
+			http.Error(
+				w,
+				"authorization check failed",
+				http.StatusInternalServerError,
+			)
 			return
 		}
 
 		if !allowed {
-			http.Error(w, "permission denied", http.StatusForbidden)
+			if recorder != nil {
+				recorder.RecordDenied(
+					r.Context(),
+					user,
+					permission,
+					resourceType,
+					r.URL.Path,
+				)
+			}
+
+			http.Error(
+				w,
+				"permission denied",
+				http.StatusForbidden,
+			)
 			return
 		}
 

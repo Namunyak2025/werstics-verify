@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Namunyak2025/werstics-verify/backend/internal/audit"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/auth"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/domain"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/payments"
@@ -17,20 +18,25 @@ const (
 )
 
 type Server struct {
-	payments *payments.Service
-	auth     *auth.Service
-	rbac     auth.PermissionChecker
+	payments  *payments.Service
+	auth      *auth.Service
+	rbac      auth.PermissionChecker
+	audit     *audit.Service
+	permAudit *auditPermissionRecorder
 }
 
 func NewServer(
 	paymentService *payments.Service,
 	authService *auth.Service,
 	rbacRepository auth.PermissionChecker,
+	auditService *audit.Service,
 ) *Server {
 	return &Server{
-		payments: paymentService,
-		auth:     authService,
-		rbac:     rbacRepository,
+		payments:  paymentService,
+		auth:      authService,
+		rbac:      rbacRepository,
+		audit:     auditService,
+		permAudit: newAuditPermissionRecorder(auditService),
 	}
 }
 
@@ -62,7 +68,6 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/health", s.health)
-
 	mux.HandleFunc("/v1/auth/register", s.register)
 	mux.HandleFunc("/v1/auth/login", s.login)
 
@@ -83,7 +88,9 @@ func (s *Server) Routes() http.Handler {
 		protected(
 			auth.RequirePermission(
 				s.rbac,
+				s.permAudit,
 				permissionPaymentCreate,
+				"payment",
 				http.HandlerFunc(s.paymentsHandler),
 			),
 		),
@@ -91,9 +98,7 @@ func (s *Server) Routes() http.Handler {
 
 	mux.Handle(
 		"/v1/payments/",
-		protected(
-			http.HandlerFunc(s.paymentByIDHandler),
-		),
+		protected(http.HandlerFunc(s.paymentByIDHandler)),
 	)
 
 	return mux
@@ -131,9 +136,36 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		request.DisplayName,
 	)
 	if err != nil {
+		_ = s.recordAudit(
+			r,
+			audit.Event{
+				OrganizationID: request.OrganizationID,
+				Action:         "auth.registration_failed",
+				ResourceType:   "user",
+				Metadata: map[string]any{
+					"email":  strings.ToLower(strings.TrimSpace(request.Email)),
+					"reason": err.Error(),
+				},
+			},
+		)
+
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	_ = s.recordAudit(
+		r,
+		audit.Event{
+			OrganizationID: user.OrganizationID,
+			Action:         "user.created",
+			ResourceType:   "user",
+			ResourceID:     user.ID,
+			Metadata: map[string]any{
+				"email":        user.Email,
+				"display_name": user.DisplayName,
+			},
+		},
+	)
 
 	writeJSON(
 		w,
@@ -164,9 +196,36 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		request.Password,
 	)
 	if err != nil {
+		_ = s.recordAudit(
+			r,
+			audit.Event{
+				OrganizationID: request.OrganizationID,
+				Action:         "auth.login_failed",
+				ResourceType:   "user",
+				Metadata: map[string]any{
+					"email":  strings.ToLower(strings.TrimSpace(request.Email)),
+					"reason": err.Error(),
+				},
+			},
+		)
+
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
+
+	_ = s.recordAudit(
+		r,
+		audit.Event{
+			OrganizationID: user.OrganizationID,
+			ActorUserID:    user.ID,
+			Action:         "auth.login",
+			ResourceType:   "user",
+			ResourceID:     user.ID,
+			Metadata: map[string]any{
+				"email": user.Email,
+			},
+		},
+	)
 
 	writeJSON(
 		w,
@@ -184,12 +243,36 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	user, _ := auth.CurrentUser(r.Context())
 	token := auth.BearerToken(r.Header.Get("Authorization"))
 
 	if err := s.auth.Logout(r.Context(), token); err != nil {
+		_ = s.recordAudit(
+			r,
+			audit.Event{
+				OrganizationID: user.OrganizationID,
+				ActorUserID:    user.ID,
+				Action:         "auth.logout_failed",
+				ResourceType:   "session",
+				Metadata: map[string]any{
+					"reason": err.Error(),
+				},
+			},
+		)
+
 		http.Error(w, "invalid session", http.StatusUnauthorized)
 		return
 	}
+
+	_ = s.recordAudit(
+		r,
+		audit.Event{
+			OrganizationID: user.OrganizationID,
+			ActorUserID:    user.ID,
+			Action:         "auth.logout",
+			ResourceType:   "session",
+		},
+	)
 
 	writeJSON(
 		w,
@@ -237,6 +320,12 @@ func (s *Server) paymentsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	user, ok := auth.CurrentUser(r.Context())
+	if !ok {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+
 	var request createPaymentRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -244,13 +333,21 @@ func (s *Server) paymentsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, ok := auth.CurrentUser(r.Context())
-	if !ok {
-		http.Error(w, "authentication required", http.StatusUnauthorized)
-		return
-	}
-
 	if user.OrganizationID != request.OrganizationID {
+		_ = s.recordAudit(
+			r,
+			audit.Event{
+				OrganizationID: user.OrganizationID,
+				ActorUserID:    user.ID,
+				Action:         "payment.create_denied",
+				ResourceType:   "payment",
+				ResourceID:     request.ID,
+				Metadata: map[string]any{
+					"reason": "organization_access_denied",
+				},
+			},
+		)
+
 		http.Error(w, "organization access denied", http.StatusForbidden)
 		return
 	}
@@ -267,6 +364,20 @@ func (s *Server) paymentsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.payments.Create(r.Context(), payment); err != nil {
+		_ = s.recordAudit(
+			r,
+			audit.Event{
+				OrganizationID: user.OrganizationID,
+				ActorUserID:    user.ID,
+				Action:         "payment.create_failed",
+				ResourceType:   "payment",
+				ResourceID:     request.ID,
+				Metadata: map[string]any{
+					"reason": err.Error(),
+				},
+			},
+		)
+
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -276,6 +387,23 @@ func (s *Server) paymentsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	_ = s.recordAudit(
+		r,
+		audit.Event{
+			OrganizationID: user.OrganizationID,
+			ActorUserID:    user.ID,
+			Action:         "payment.created",
+			ResourceType:   "payment",
+			ResourceID:     created.ID,
+			Metadata: map[string]any{
+				"merchant_id": created.MerchantID,
+				"provider":    created.Provider,
+				"currency":    created.Expected.Currency,
+				"minor":       created.Expected.Minor,
+			},
+		},
+	)
 
 	writeJSON(w, http.StatusCreated, created)
 }
@@ -312,6 +440,20 @@ func (s *Server) paymentByIDHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if payment.OrganizationID != user.OrganizationID {
+			_ = s.recordAudit(
+				r,
+				audit.Event{
+					OrganizationID: user.OrganizationID,
+					ActorUserID:    user.ID,
+					Action:         "payment.verification_denied",
+					ResourceType:   "payment",
+					ResourceID:     paymentID,
+					Metadata: map[string]any{
+						"reason": "organization_access_denied",
+					},
+				},
+			)
+
 			http.Error(w, "organization access denied", http.StatusForbidden)
 			return
 		}
@@ -327,6 +469,20 @@ func (s *Server) paymentByIDHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if !allowed {
+			_ = s.recordAudit(
+				r,
+				audit.Event{
+					OrganizationID: user.OrganizationID,
+					ActorUserID:    user.ID,
+					Action:         "payment.verification_denied",
+					ResourceType:   "payment",
+					ResourceID:     paymentID,
+					Metadata: map[string]any{
+						"reason": "permission_denied",
+					},
+				},
+			)
+
 			http.Error(w, "permission denied", http.StatusForbidden)
 			return
 		}
@@ -345,9 +501,48 @@ func (s *Server) paymentByIDHandler(w http.ResponseWriter, r *http.Request) {
 			event,
 		)
 		if err != nil {
+			_ = s.recordAudit(
+				r,
+				audit.Event{
+					OrganizationID: user.OrganizationID,
+					ActorUserID:    user.ID,
+					Action:         "payment.verification_failed",
+					ResourceType:   "payment",
+					ResourceID:     paymentID,
+					Metadata: map[string]any{
+						"event_id": event.EventID,
+						"provider": event.Provider,
+						"kind":     event.Kind,
+						"reason":   err.Error(),
+					},
+				},
+			)
+
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+
+		_ = s.recordAudit(
+			r,
+			audit.Event{
+				OrganizationID: user.OrganizationID,
+				ActorUserID:    user.ID,
+				Action:         "payment.verification_completed",
+				ResourceType:   "payment",
+				ResourceID:     paymentID,
+				Metadata: map[string]any{
+					"event_id":          event.EventID,
+					"provider":          event.Provider,
+					"provider_event_id": event.ProviderEventID,
+					"kind":              event.Kind,
+					"matched":           match.Matched,
+					"amount_matched":    match.AmountMatched,
+					"merchant_matched":  match.MerchantMatch,
+					"reason":            match.Reason,
+					"status":            updated.Status,
+				},
+			},
+		)
 
 		writeJSON(
 			w,
@@ -377,6 +572,20 @@ func (s *Server) paymentByIDHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !allowed {
+		_ = s.recordAudit(
+			r,
+			audit.Event{
+				OrganizationID: user.OrganizationID,
+				ActorUserID:    user.ID,
+				Action:         "payment.read_denied",
+				ResourceType:   "payment",
+				ResourceID:     id,
+				Metadata: map[string]any{
+					"reason": "permission_denied",
+				},
+			},
+		)
+
 		http.Error(w, "permission denied", http.StatusForbidden)
 		return
 	}
@@ -388,11 +597,36 @@ func (s *Server) paymentByIDHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if payment.OrganizationID != user.OrganizationID {
+		_ = s.recordAudit(
+			r,
+			audit.Event{
+				OrganizationID: user.OrganizationID,
+				ActorUserID:    user.ID,
+				Action:         "payment.read_denied",
+				ResourceType:   "payment",
+				ResourceID:     id,
+				Metadata: map[string]any{
+					"reason": "organization_access_denied",
+				},
+			},
+		)
+
 		http.Error(w, "organization access denied", http.StatusForbidden)
 		return
 	}
 
 	writeJSON(w, http.StatusOK, payment)
+}
+
+func (s *Server) recordAudit(
+	r *http.Request,
+	event audit.Event,
+) error {
+	if s.audit == nil {
+		return nil
+	}
+
+	return s.audit.Record(r.Context(), event)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
