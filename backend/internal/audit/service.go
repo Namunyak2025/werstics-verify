@@ -3,13 +3,22 @@ package audit
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 )
 
+const (
+	ActorTypeUser   = "user"
+	ActorTypeSystem = "system"
+)
+
+var ErrInvalidActorType = errors.New("invalid audit actor type")
+
 type Event struct {
 	OrganizationID string
 	ActorUserID    string
+	ActorType      string
 	Action         string
 	ResourceType   string
 	ResourceID     string
@@ -39,6 +48,23 @@ func (s *Service) Record(
 
 	if event.Metadata == nil {
 		event.Metadata = map[string]any{}
+	}
+
+	if event.ActorType == "" {
+		if event.ActorUserID == "" {
+			event.ActorType = ActorTypeSystem
+		} else {
+			event.ActorType = ActorTypeUser
+		}
+	}
+
+	if event.ActorType != ActorTypeUser &&
+		event.ActorType != ActorTypeSystem {
+		return ErrInvalidActorType
+	}
+
+	if event.ActorType == ActorTypeSystem {
+		event.ActorUserID = ""
 	}
 
 	if _, err := json.Marshal(event.Metadata); err != nil {

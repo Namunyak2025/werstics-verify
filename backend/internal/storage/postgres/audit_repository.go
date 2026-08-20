@@ -27,6 +27,7 @@ func (r *AuditRepository) Record(
 			id,
 			organization_id,
 			actor_user_id,
+			actor_type,
 			action,
 			resource_type,
 			resource_id,
@@ -39,9 +40,10 @@ func (r *AuditRepository) Record(
 			NULLIF($2, '')::uuid,
 			$3,
 			$4,
-			NULLIF($5, ''),
-			$6::jsonb,
-			$7
+			$5,
+			NULLIF($6, ''),
+			$7::jsonb,
+			$8
 		)
 	`
 
@@ -55,6 +57,7 @@ func (r *AuditRepository) Record(
 		query,
 		event.OrganizationID,
 		event.ActorUserID,
+		event.ActorType,
 		event.Action,
 		event.ResourceType,
 		event.ResourceID,
