@@ -13,20 +13,42 @@ type Server struct {
 	payments *payments.Service
 }
 
-func NewServer() *Server {
-	return &Server{payments: payments.NewService()}
+func NewServer(paymentService *payments.Service) *Server {
+	return &Server{
+		payments: paymentService,
+	}
+}
+
+type createPaymentRequest struct {
+	ID              string       `json:"id"`
+	OrganizationID  string       `json:"organization_id"`
+	MerchantID      string       `json:"merchant_id"`
+	SessionID       string       `json:"session_id"`
+	Provider        string       `json:"provider"`
+	ProviderRef     string       `json:"provider_ref,omitempty"`
+	Expected        domain.Money `json:"expected"`
+	CustomerDisplay string       `json:"customer_display,omitempty"`
 }
 
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
+
 	mux.HandleFunc("/health", s.health)
 	mux.HandleFunc("/v1/payments", s.paymentsHandler)
 	mux.HandleFunc("/v1/payments/", s.paymentByIDHandler)
+
 	return mux
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "service": "werstics-verify"})
+	writeJSON(
+		w,
+		http.StatusOK,
+		map[string]string{
+			"status":  "ok",
+			"service": "werstics-verify",
+		},
+	)
 }
 
 func (s *Server) paymentsHandler(w http.ResponseWriter, r *http.Request) {
@@ -34,46 +56,94 @@ func (s *Server) paymentsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var p domain.Payment
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+
+	var request createPaymentRequest
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	if err := s.payments.Create(p); err != nil {
+
+	payment := domain.Payment{
+		ID:              request.ID,
+		OrganizationID:  request.OrganizationID,
+		MerchantID:      request.MerchantID,
+		SessionID:       request.SessionID,
+		Provider:        request.Provider,
+		ProviderRef:     request.ProviderRef,
+		Expected:        request.Expected,
+		CustomerDisplay: request.CustomerDisplay,
+	}
+
+	if err := s.payments.Create(r.Context(), payment); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, http.StatusCreated, p)
+
+	created, err := s.payments.Get(r.Context(), payment.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, created)
 }
 
 func (s *Server) paymentByIDHandler(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/v1/payments/")
-	if r.Method == http.MethodGet {
-		p, ok := s.payments.Get(id)
-		if !ok {
-			http.Error(w, "payment not found", http.StatusNotFound)
-			return
-		}
-		writeJSON(w, http.StatusOK, p)
+
+	if id == "" {
+		http.Error(w, "payment id is required", http.StatusBadRequest)
 		return
 	}
-	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/events") {
-		id = strings.TrimSuffix(id, "/events")
+
+	if strings.HasSuffix(id, "/events") {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		paymentID := strings.TrimSuffix(id, "/events")
+
 		var event domain.PaymentEvent
+
 		if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		event.PaymentID = id
-		p, match, err := s.payments.ApplyEvent(event)
+
+		event.PaymentID = paymentID
+
+		payment, match, err := s.payments.ApplyEvent(r.Context(), event)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"payment": p, "match": match})
+
+		writeJSON(
+			w,
+			http.StatusOK,
+			map[string]any{
+				"payment": payment,
+				"match":   match,
+			},
+		)
+
 		return
 	}
-	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	payment, err := s.payments.Get(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, payment)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

@@ -17,6 +17,7 @@ type Money struct {
 
 type Payment struct {
 	ID              string        `json:"id"`
+	OrganizationID  string        `json:"organization_id"`
 	MerchantID      string        `json:"merchant_id"`
 	SessionID       string        `json:"session_id"`
 	Provider        string        `json:"provider"`
@@ -32,6 +33,9 @@ type Payment struct {
 func (p Payment) Validate() error {
 	if p.ID == "" {
 		return ErrInvalidPaymentID
+	}
+	if p.OrganizationID == "" {
+		return errors.New("organization id is required")
 	}
 	if p.Expected.Minor <= 0 {
 		return ErrInvalidAmount
