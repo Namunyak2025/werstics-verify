@@ -5,17 +5,32 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Namunyak2025/werstics-verify/backend/internal/auth"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/domain"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/payments"
 )
 
+const (
+	permissionPaymentCreate = "payment:create"
+	permissionPaymentRead   = "payment:read"
+	permissionPaymentVerify = "payment:verify"
+)
+
 type Server struct {
 	payments *payments.Service
+	auth     *auth.Service
+	rbac     auth.PermissionChecker
 }
 
-func NewServer(paymentService *payments.Service) *Server {
+func NewServer(
+	paymentService *payments.Service,
+	authService *auth.Service,
+	rbacRepository auth.PermissionChecker,
+) *Server {
 	return &Server{
 		payments: paymentService,
+		auth:     authService,
+		rbac:     rbacRepository,
 	}
 }
 
@@ -30,12 +45,56 @@ type createPaymentRequest struct {
 	CustomerDisplay string       `json:"customer_display,omitempty"`
 }
 
+type registerRequest struct {
+	OrganizationID string `json:"organization_id"`
+	Email          string `json:"email"`
+	Password       string `json:"password"`
+	DisplayName    string `json:"display_name"`
+}
+
+type loginRequest struct {
+	OrganizationID string `json:"organization_id"`
+	Email          string `json:"email"`
+	Password       string `json:"password"`
+}
+
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/health", s.health)
-	mux.HandleFunc("/v1/payments", s.paymentsHandler)
-	mux.HandleFunc("/v1/payments/", s.paymentByIDHandler)
+
+	mux.HandleFunc("/v1/auth/register", s.register)
+	mux.HandleFunc("/v1/auth/login", s.login)
+
+	protected := auth.Middleware(s.auth)
+
+	mux.Handle(
+		"/v1/auth/logout",
+		protected(http.HandlerFunc(s.logout)),
+	)
+
+	mux.Handle(
+		"/v1/auth/me",
+		protected(http.HandlerFunc(s.me)),
+	)
+
+	mux.Handle(
+		"/v1/payments",
+		protected(
+			auth.RequirePermission(
+				s.rbac,
+				permissionPaymentCreate,
+				http.HandlerFunc(s.paymentsHandler),
+			),
+		),
+	)
+
+	mux.Handle(
+		"/v1/payments/",
+		protected(
+			http.HandlerFunc(s.paymentByIDHandler),
+		),
+	)
 
 	return mux
 }
@@ -51,6 +110,127 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
+func (s *Server) register(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var request registerRequest
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	user, err := s.auth.Register(
+		r.Context(),
+		request.OrganizationID,
+		request.Email,
+		request.Password,
+		request.DisplayName,
+	)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	writeJSON(
+		w,
+		http.StatusCreated,
+		map[string]any{
+			"user": user,
+		},
+	)
+}
+
+func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var request loginRequest
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	user, token, err := s.auth.Login(
+		r.Context(),
+		request.OrganizationID,
+		request.Email,
+		request.Password,
+	)
+	if err != nil {
+		http.Error(w, "invalid credentials", http.StatusUnauthorized)
+		return
+	}
+
+	writeJSON(
+		w,
+		http.StatusOK,
+		map[string]any{
+			"token": token,
+			"user":  user,
+		},
+	)
+}
+
+func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	token := auth.BearerToken(r.Header.Get("Authorization"))
+
+	if err := s.auth.Logout(r.Context(), token); err != nil {
+		http.Error(w, "invalid session", http.StatusUnauthorized)
+		return
+	}
+
+	writeJSON(
+		w,
+		http.StatusOK,
+		map[string]string{
+			"status": "logged_out",
+		},
+	)
+}
+
+func (s *Server) me(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	user, ok := auth.CurrentUser(r.Context())
+	if !ok {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+
+	permissions, err := auth.CurrentPermissions(
+		r.Context(),
+		s.rbac,
+	)
+	if err != nil {
+		http.Error(w, "authorization check failed", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(
+		w,
+		http.StatusOK,
+		map[string]any{
+			"user":        user,
+			"permissions": permissions,
+		},
+	)
+}
+
 func (s *Server) paymentsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -61,6 +241,17 @@ func (s *Server) paymentsHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	user, ok := auth.CurrentUser(r.Context())
+	if !ok {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+
+	if user.OrganizationID != request.OrganizationID {
+		http.Error(w, "organization access denied", http.StatusForbidden)
 		return
 	}
 
@@ -97,6 +288,12 @@ func (s *Server) paymentByIDHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	user, ok := auth.CurrentUser(r.Context())
+	if !ok {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+
 	if strings.HasSuffix(id, "/events") {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -104,6 +301,35 @@ func (s *Server) paymentByIDHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		paymentID := strings.TrimSuffix(id, "/events")
+
+		payment, err := s.payments.Get(
+			r.Context(),
+			paymentID,
+		)
+		if err != nil {
+			http.Error(w, "payment not found", http.StatusNotFound)
+			return
+		}
+
+		if payment.OrganizationID != user.OrganizationID {
+			http.Error(w, "organization access denied", http.StatusForbidden)
+			return
+		}
+
+		allowed, err := s.rbac.HasPermission(
+			r.Context(),
+			user.ID,
+			permissionPaymentVerify,
+		)
+		if err != nil {
+			http.Error(w, "authorization check failed", http.StatusInternalServerError)
+			return
+		}
+
+		if !allowed {
+			http.Error(w, "permission denied", http.StatusForbidden)
+			return
+		}
 
 		var event domain.PaymentEvent
 
@@ -114,7 +340,10 @@ func (s *Server) paymentByIDHandler(w http.ResponseWriter, r *http.Request) {
 
 		event.PaymentID = paymentID
 
-		payment, match, err := s.payments.ApplyEvent(r.Context(), event)
+		updated, match, err := s.payments.ApplyEvent(
+			r.Context(),
+			event,
+		)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -124,7 +353,7 @@ func (s *Server) paymentByIDHandler(w http.ResponseWriter, r *http.Request) {
 			w,
 			http.StatusOK,
 			map[string]any{
-				"payment": payment,
+				"payment": updated,
 				"match":   match,
 			},
 		)
@@ -137,9 +366,29 @@ func (s *Server) paymentByIDHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	allowed, err := s.rbac.HasPermission(
+		r.Context(),
+		user.ID,
+		permissionPaymentRead,
+	)
+	if err != nil {
+		http.Error(w, "authorization check failed", http.StatusInternalServerError)
+		return
+	}
+
+	if !allowed {
+		http.Error(w, "permission denied", http.StatusForbidden)
+		return
+	}
+
 	payment, err := s.payments.Get(r.Context(), id)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		http.Error(w, "payment not found", http.StatusNotFound)
+		return
+	}
+
+	if payment.OrganizationID != user.OrganizationID {
+		http.Error(w, "organization access denied", http.StatusForbidden)
 		return
 	}
 

@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/Namunyak2025/werstics-verify/backend/internal/api"
+	"github.com/Namunyak2025/werstics-verify/backend/internal/auth"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/payments"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/storage/postgres"
 )
@@ -32,9 +33,19 @@ func main() {
 	}
 	defer pool.Close()
 
-	repository := postgres.NewRepository(pool)
-	paymentService := payments.NewService(repository)
-	server := api.NewServer(paymentService)
+	paymentRepository := postgres.NewRepository(pool)
+	paymentService := payments.NewService(paymentRepository)
+
+	authRepository := postgres.NewAuthRepository(pool)
+	authService := auth.NewService(authRepository)
+
+	rbacRepository := postgres.NewRBACRepository(pool)
+
+	server := api.NewServer(
+		paymentService,
+		authService,
+		rbacRepository,
+	)
 
 	log.Printf("Werstics Verify API listening on %s", addr)
 
