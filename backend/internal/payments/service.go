@@ -12,6 +12,7 @@ import (
 type Repository interface {
 	CreatePayment(ctx context.Context, payment domain.Payment) error
 	GetPayment(ctx context.Context, paymentID string) (domain.Payment, error)
+	ListPayments(ctx context.Context, filter domain.PaymentFilter) ([]domain.Payment, int, error)
 	ApplyPaymentEvent(
 		ctx context.Context,
 		paymentID string,
@@ -27,6 +28,34 @@ type Service struct {
 
 func NewService(repo Repository) *Service {
 	return &Service{repo: repo}
+}
+
+func (s *Service) List(
+	ctx context.Context,
+	filter domain.PaymentFilter,
+) ([]domain.Payment, int, error) {
+	if filter.Page < 1 {
+		filter.Page = 1
+	}
+
+	if filter.PageSize < 1 {
+		filter.PageSize = 25
+	}
+
+	if filter.PageSize > 100 {
+		filter.PageSize = 100
+	}
+
+	if filter.OrganizationID == "" {
+		return nil, 0, fmt.Errorf("organization id is required")
+	}
+
+	payments, total, err := s.repo.ListPayments(ctx, filter)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list payments: %w", err)
+	}
+
+	return payments, total, nil
 }
 
 func (s *Service) Create(ctx context.Context, payment domain.Payment) error {
