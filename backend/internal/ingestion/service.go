@@ -12,6 +12,7 @@ import (
 
 var (
 	ErrProviderRequired = errors.New("provider is required")
+	ErrProcessingFailed = errors.New("provider event processing failed")
 )
 
 type Service struct {
@@ -106,7 +107,8 @@ func (s *Service) IngestDetailed(
 				Disposition: disposition,
 				Event:       event,
 			}, fmt.Errorf(
-				"apply normalized provider event: %w",
+				"%w: %v",
+				ErrProcessingFailed,
 				err,
 			)
 	}
@@ -124,71 +126,12 @@ func (s *Service) Ingest(
 	payload []byte,
 	headers map[string]string,
 ) (domain.Payment, error) {
-	if provider == "" {
-		return domain.Payment{}, ErrProviderRequired
-	}
-
-	if s.registry == nil {
-		return domain.Payment{}, fmt.Errorf(
-			"provider registry is not configured",
-		)
-	}
-
-	adapter, err := s.registry.Get(provider)
-	if err != nil {
-		return domain.Payment{}, err
-	}
-
-	if err := adapter.VerifySignature(
+	result, err := s.IngestDetailed(
 		ctx,
+		provider,
 		payload,
 		headers,
-	); err != nil {
-		return domain.Payment{}, fmt.Errorf(
-			"verify provider signature: %w",
-			err,
-		)
-	}
-
-	event, err := adapter.Normalize(ctx, payload)
-	if err != nil {
-		return domain.Payment{}, fmt.Errorf(
-			"normalize provider event: %w",
-			err,
-		)
-	}
-
-	if event.Provider != adapter.Name() {
-		return domain.Payment{}, fmt.Errorf(
-			"normalized event provider %q does not match adapter %q",
-			event.Provider,
-			adapter.Name(),
-		)
-	}
-
-	if s.payments == nil {
-		return domain.Payment{}, fmt.Errorf(
-			"payment service is not configured",
-		)
-	}
-
-	if event.PaymentID == "" {
-		return domain.Payment{}, fmt.Errorf(
-			"%w: payment_id",
-			providers.ErrMalformedPayload,
-		)
-	}
-
-	updated, _, err := s.payments.ApplyEvent(
-		ctx,
-		event,
 	)
-	if err != nil {
-		return domain.Payment{}, fmt.Errorf(
-			"apply normalized provider event: %w",
-			err,
-		)
-	}
 
-	return updated, nil
+	return result.Payment, err
 }
