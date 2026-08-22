@@ -169,9 +169,26 @@ func (r *Repository) ApplyPaymentEvent(
 	target domain.PaymentStatus,
 	match verification.MatchResult,
 ) (domain.Payment, error) {
+	payment, _, err := r.ApplyPaymentEventDetailed(
+		ctx,
+		paymentID,
+		event,
+		target,
+		match,
+	)
+	return payment, err
+}
+
+func (r *Repository) ApplyPaymentEventDetailed(
+	ctx context.Context,
+	paymentID string,
+	event domain.PaymentEvent,
+	target domain.PaymentStatus,
+	match verification.MatchResult,
+) (domain.Payment, domain.PaymentEventDisposition, error) {
 	tx, err := r.db.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return domain.Payment{}, fmt.Errorf("begin payment event transaction: %w", err)
+		return domain.Payment{}, "", fmt.Errorf("begin payment event transaction: %w", err)
 	}
 
 	defer func() {
@@ -229,11 +246,11 @@ func (r *Repository) ApplyPaymentEvent(
 	)
 
 	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.Payment{}, ErrNotFound
+		return domain.Payment{}, "", ErrNotFound
 	}
 
 	if err != nil {
-		return domain.Payment{}, fmt.Errorf("lock payment: %w", err)
+		return domain.Payment{}, "", fmt.Errorf("lock payment: %w", err)
 	}
 
 	payment.Expected = domain.Money{
@@ -309,7 +326,7 @@ func (r *Repository) ApplyPaymentEvent(
 	}
 
 	if err != nil {
-		return domain.Payment{}, fmt.Errorf("insert payment event: %w", err)
+		return domain.Payment{}, "", fmt.Errorf("insert payment event: %w", err)
 	}
 
 	const insertVerification = `
@@ -345,12 +362,12 @@ func (r *Repository) ApplyPaymentEvent(
 	)
 
 	if err != nil {
-		return domain.Payment{}, fmt.Errorf("insert payment verification: %w", err)
+		return domain.Payment{}, "", fmt.Errorf("insert payment verification: %w", err)
 	}
 
 	if match.Matched {
 		if err := domain.ValidateTransition(payment.Status, target); err != nil {
-			return domain.Payment{}, err
+			return domain.Payment{}, "", err
 		}
 
 		const updatePayment = `
@@ -377,7 +394,7 @@ func (r *Repository) ApplyPaymentEvent(
 		)
 
 		if err != nil {
-			return domain.Payment{}, fmt.Errorf("update payment state: %w", err)
+			return domain.Payment{}, "", fmt.Errorf("update payment state: %w", err)
 		}
 
 		payment.Received = &domain.Money{
@@ -392,10 +409,10 @@ func (r *Repository) ApplyPaymentEvent(
 	payment.UpdatedAt = payment.UpdatedAt.UTC()
 
 	if err := tx.Commit(ctx); err != nil {
-		return domain.Payment{}, fmt.Errorf("commit payment event: %w", err)
+		return domain.Payment{}, "", fmt.Errorf("commit payment event: %w", err)
 	}
 
-	return payment, nil
+	return payment, domain.EventDispositionAccepted, nil
 }
 
 func (r *Repository) handleDuplicateEvent(
@@ -403,7 +420,7 @@ func (r *Repository) handleDuplicateEvent(
 	tx pgx.Tx,
 	payment domain.Payment,
 	event domain.PaymentEvent,
-) (domain.Payment, error) {
+) (domain.Payment, domain.PaymentEventDisposition, error) {
 	const eventQuery = `
 		SELECT
 			p.payment_id,
@@ -466,16 +483,17 @@ func (r *Repository) handleDuplicateEvent(
 	)
 
 	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.Payment{}, ErrDuplicateEvent
+		return domain.Payment{}, "", ErrDuplicateEvent
 	}
 
 	if err != nil {
-		return domain.Payment{}, fmt.Errorf("find duplicate event: %w", err)
+		return domain.Payment{}, "", fmt.Errorf("find duplicate event: %w", err)
 	}
 
 	if storedPaymentID != payment.ID {
-		return domain.Payment{}, fmt.Errorf(
-			"conflicting payment event: event already belongs to payment %s",
+		return domain.Payment{}, domain.EventDispositionConflict, fmt.Errorf(
+			"%w: event already belongs to payment %s",
+			domain.ErrPaymentEventConflict,
 			storedPaymentID,
 		)
 	}
@@ -490,7 +508,7 @@ func (r *Repository) handleDuplicateEvent(
 	localIdentityMatches := storedEventID == event.EventID
 
 	if !providerIdentityMatches && !localIdentityMatches {
-		return domain.Payment{}, ErrDuplicateEvent
+		return domain.Payment{}, "", ErrDuplicateEvent
 	}
 
 	// PostgreSQL timestamptz stores microsecond precision. Normalize the
@@ -504,8 +522,9 @@ func (r *Repository) handleDuplicateEvent(
 		storedCustomerDisplay != event.CustomerDisplay ||
 		storedKind != event.Kind ||
 		!storedOccurredAt.UTC().Equal(eventOccurredAt) {
-		return domain.Payment{}, fmt.Errorf(
-			"conflicting payment event: existing event payload differs",
+		return domain.Payment{}, domain.EventDispositionConflict, fmt.Errorf(
+			"%w: existing event payload differs",
+			domain.ErrPaymentEventConflict,
 		)
 	}
 
@@ -533,24 +552,24 @@ func (r *Repository) handleDuplicateEvent(
 	)
 
 	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.Payment{}, ErrDuplicateEvent
+		return domain.Payment{}, "", ErrDuplicateEvent
 	}
 
 	if err != nil {
-		return domain.Payment{}, fmt.Errorf(
+		return domain.Payment{}, "", fmt.Errorf(
 			"find duplicate verification: %w",
 			err,
 		)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return domain.Payment{}, fmt.Errorf(
+		return domain.Payment{}, "", fmt.Errorf(
 			"commit duplicate event transaction: %w",
 			err,
 		)
 	}
 
-	return payment, nil
+	return payment, domain.EventDispositionDuplicate, nil
 }
 
 func processingStatus(match verification.MatchResult) string {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/Namunyak2025/werstics-verify/backend/internal/api"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/domain"
+	"github.com/Namunyak2025/werstics-verify/backend/internal/ingestion"
 )
 
 type fakeProviderIngestion struct {
@@ -36,6 +37,26 @@ func (f *fakeProviderIngestion) Ingest(
 	}
 
 	return f.payment, f.err
+}
+
+func (f *fakeProviderIngestion) IngestDetailed(
+	_ context.Context,
+	provider string,
+	payload []byte,
+	headers map[string]string,
+) (ingestion.Result, error) {
+	f.provider = provider
+	f.payload = append([]byte(nil), payload...)
+
+	f.headers = make(map[string]string, len(headers))
+	for key, value := range headers {
+		f.headers[key] = value
+	}
+
+	return ingestion.Result{
+		Payment:     f.payment,
+		Disposition: "accepted",
+	}, f.err
 }
 
 func newWebhookServer(

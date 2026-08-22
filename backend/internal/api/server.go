@@ -11,6 +11,7 @@ import (
 	"github.com/Namunyak2025/werstics-verify/backend/internal/audit"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/auth"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/domain"
+	"github.com/Namunyak2025/werstics-verify/backend/internal/ingestion"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/payments"
 )
 
@@ -26,12 +27,12 @@ type ReadinessChecker interface {
 }
 
 type ProviderIngestion interface {
-	Ingest(
+	IngestDetailed(
 		ctx context.Context,
 		provider string,
 		payload []byte,
 		headers map[string]string,
-	) (domain.Payment, error)
+	) (ingestion.Result, error)
 }
 
 type Server struct {

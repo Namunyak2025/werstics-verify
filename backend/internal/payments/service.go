@@ -20,6 +20,13 @@ type Repository interface {
 		target domain.PaymentStatus,
 		match verification.MatchResult,
 	) (domain.Payment, error)
+	ApplyPaymentEventDetailed(
+		ctx context.Context,
+		paymentID string,
+		event domain.PaymentEvent,
+		target domain.PaymentStatus,
+		match verification.MatchResult,
+	) (domain.Payment, domain.PaymentEventDisposition, error)
 }
 
 type Service struct {
@@ -83,6 +90,60 @@ func (s *Service) Get(ctx context.Context, paymentID string) (domain.Payment, er
 	}
 
 	return payment, nil
+}
+
+func (s *Service) ApplyEventDetailed(
+	ctx context.Context,
+	event domain.PaymentEvent,
+) (domain.Payment, domain.PaymentEventDisposition, verification.MatchResult, error) {
+	payment, err := s.repo.GetPayment(ctx, event.PaymentID)
+	if err != nil {
+		return domain.Payment{}, "", verification.MatchResult{}, fmt.Errorf(
+			"get payment for event: %w",
+			err,
+		)
+	}
+
+	target, err := targetStatus(event.Kind)
+	if err != nil {
+		return payment, "", verification.MatchResult{}, err
+	}
+
+	match := verification.Match(payment, event)
+
+	if !match.Matched {
+		_, disposition, err := s.repo.ApplyPaymentEventDetailed(
+			ctx,
+			payment.ID,
+			event,
+			payment.Status,
+			match,
+		)
+		if err != nil {
+			return payment, disposition, match, fmt.Errorf(
+				"persist unmatched payment event: %w",
+				err,
+			)
+		}
+
+		return payment, disposition, match, nil
+	}
+
+	updated, disposition, err := s.repo.ApplyPaymentEventDetailed(
+		ctx,
+		payment.ID,
+		event,
+		target,
+		match,
+	)
+	if err != nil {
+		return payment, disposition, match, fmt.Errorf(
+			"apply payment event: %w",
+			err,
+		)
+	}
+
+	return updated, disposition, match, nil
 }
 
 func (s *Service) ApplyEvent(
