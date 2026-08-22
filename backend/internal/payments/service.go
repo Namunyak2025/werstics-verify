@@ -97,6 +97,11 @@ func (s *Service) ApplyEvent(
 		)
 	}
 
+	target, err := targetStatus(event.Kind)
+	if err != nil {
+		return payment, verification.MatchResult{}, err
+	}
+
 	match := verification.Match(payment, event)
 
 	if !match.Matched {
@@ -115,11 +120,6 @@ func (s *Service) ApplyEvent(
 		}
 
 		return payment, match, nil
-	}
-
-	target, err := targetStatus(event.Kind)
-	if err != nil {
-		return payment, match, err
 	}
 
 	if err := domain.ValidateTransition(payment.Status, target); err != nil {

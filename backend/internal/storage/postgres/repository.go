@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -404,17 +405,44 @@ func (r *Repository) handleDuplicateEvent(
 	event domain.PaymentEvent,
 ) (domain.Payment, error) {
 	const eventQuery = `
-		SELECT id
-		FROM payment_events
-		WHERE event_id = $1
+		SELECT
+			p.payment_id,
+			pe.id,
+			pe.event_id,
+			pe.provider,
+			pe.provider_event_id,
+			COALESCE(pe.provider_ref, ''),
+			pe.merchant_id,
+			pe.amount_currency,
+			pe.amount_minor,
+			COALESCE(pe.customer_display, ''),
+			pe.kind,
+			pe.occurred_at
+		FROM payment_events pe
+		JOIN payments p
+			ON p.id = pe.payment_id
+		WHERE pe.event_id = $1
 		   OR (
-				provider = $2
-				AND provider_event_id = $3
+				pe.provider = $2
+				AND pe.provider_event_id = $3
 		   )
 		LIMIT 1
 	`
 
-	var eventInternalID string
+	var (
+		storedPaymentID       string
+		eventInternalID       string
+		storedEventID         string
+		storedProvider        string
+		storedProviderEventID string
+		storedProviderRef     string
+		storedMerchantID      string
+		storedAmountCurrency  string
+		storedAmountMinor     int64
+		storedCustomerDisplay string
+		storedKind            string
+		storedOccurredAt      time.Time
+	)
 
 	err := tx.QueryRow(
 		ctx,
@@ -422,7 +450,20 @@ func (r *Repository) handleDuplicateEvent(
 		event.EventID,
 		event.Provider,
 		event.ProviderEventID,
-	).Scan(&eventInternalID)
+	).Scan(
+		&storedPaymentID,
+		&eventInternalID,
+		&storedEventID,
+		&storedProvider,
+		&storedProviderEventID,
+		&storedProviderRef,
+		&storedMerchantID,
+		&storedAmountCurrency,
+		&storedAmountMinor,
+		&storedCustomerDisplay,
+		&storedKind,
+		&storedOccurredAt,
+	)
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Payment{}, ErrDuplicateEvent
@@ -430,6 +471,42 @@ func (r *Repository) handleDuplicateEvent(
 
 	if err != nil {
 		return domain.Payment{}, fmt.Errorf("find duplicate event: %w", err)
+	}
+
+	if storedPaymentID != payment.ID {
+		return domain.Payment{}, fmt.Errorf(
+			"conflicting payment event: event already belongs to payment %s",
+			storedPaymentID,
+		)
+	}
+
+	// The provider event identity is (provider, provider_event_id).
+	// A provider retry may legitimately carry a different local event_id.
+	providerIdentityMatches :=
+		storedProvider == event.Provider &&
+			storedProviderEventID == event.ProviderEventID
+
+	// A local event_id match must refer to the same substantive event.
+	localIdentityMatches := storedEventID == event.EventID
+
+	if !providerIdentityMatches && !localIdentityMatches {
+		return domain.Payment{}, ErrDuplicateEvent
+	}
+
+	// PostgreSQL timestamptz stores microsecond precision. Normalize the
+	// incoming Go timestamp before comparing it with the persisted value.
+	eventOccurredAt := event.OccurredAt.UTC().Truncate(time.Microsecond)
+
+	if storedProviderRef != event.ProviderRef ||
+		storedMerchantID != event.MerchantID ||
+		storedAmountCurrency != event.Amount.Currency ||
+		storedAmountMinor != event.Amount.Minor ||
+		storedCustomerDisplay != event.CustomerDisplay ||
+		storedKind != event.Kind ||
+		!storedOccurredAt.UTC().Equal(eventOccurredAt) {
+		return domain.Payment{}, fmt.Errorf(
+			"conflicting payment event: existing event payload differs",
+		)
 	}
 
 	const verificationQuery = `
@@ -460,11 +537,17 @@ func (r *Repository) handleDuplicateEvent(
 	}
 
 	if err != nil {
-		return domain.Payment{}, fmt.Errorf("find duplicate verification: %w", err)
+		return domain.Payment{}, fmt.Errorf(
+			"find duplicate verification: %w",
+			err,
+		)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return domain.Payment{}, fmt.Errorf("commit duplicate event transaction: %w", err)
+		return domain.Payment{}, fmt.Errorf(
+			"commit duplicate event transaction: %w",
+			err,
+		)
 	}
 
 	return payment, nil
