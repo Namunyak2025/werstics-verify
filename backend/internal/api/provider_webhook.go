@@ -9,6 +9,7 @@ import (
 
 	"github.com/Namunyak2025/werstics-verify/backend/internal/audit"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/domain"
+	"github.com/Namunyak2025/werstics-verify/backend/internal/ingestion"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/providers"
 )
 
@@ -87,6 +88,9 @@ func (s *Server) providerWebhook(
 		status := http.StatusBadRequest
 
 		switch {
+		case errors.Is(err, ingestion.ErrProcessingFailed):
+			status = http.StatusInternalServerError
+
 		case errors.Is(err, providers.ErrUnsupportedProvider):
 			status = http.StatusNotFound
 

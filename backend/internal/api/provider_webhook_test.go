@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -237,5 +238,39 @@ func TestProviderWebhookRejectsMalformedPayload(t *testing.T) {
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestProviderWebhookProcessingFailureReturns500(t *testing.T) {
+	fake := &fakeProviderIngestion{
+		err: fmt.Errorf(
+			"%w: database unavailable",
+			ingestion.ErrProcessingFailed,
+		),
+	}
+
+	server := newWebhookServer(fake)
+	defer server.Close()
+
+	req, err := http.NewRequest(
+		http.MethodPost,
+		server.URL+"/v1/providers/simulator/webhook",
+		bytes.NewReader([]byte(`{}`)),
+	)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("send request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf(
+			"expected 500 for processing failure, got %d",
+			resp.StatusCode,
+		)
 	}
 }
