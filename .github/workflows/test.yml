@@ -31,7 +31,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.25'
 
       - name: Install PostgreSQL client
         run: |
@@ -39,18 +39,7 @@ jobs:
           sudo apt-get install -y postgresql-client
 
       - name: Apply database migrations
-        run: |
-          set -e
-          for migration in db/migrations/*_*.up.sql; do
-            echo "Applying $migration"
-            PGPASSWORD=namunyak psql \
-              -h localhost \
-              -U werstics_verify \
-              -d werstics_verify \
-              -v ON_ERROR_STOP=1 \
-              -f "$migration"
-          done
-
+        run: ./scripts/migrate.sh
       - name: Run Go tests
         run: go test ./...
 
