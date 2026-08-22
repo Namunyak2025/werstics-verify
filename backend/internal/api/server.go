@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -940,7 +941,20 @@ func (s *Server) recordAudit(
 		return nil
 	}
 
-	return s.audit.Record(r.Context(), event)
+	if err := s.audit.Record(r.Context(), event); err != nil {
+		slog.Error(
+			"audit write failed",
+			"action", event.Action,
+			"resource_type", event.ResourceType,
+			"resource_id", event.ResourceID,
+			"organization_id", event.OrganizationID,
+			"actor_user_id", event.ActorUserID,
+			"error", err,
+		)
+		return err
+	}
+
+	return nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
