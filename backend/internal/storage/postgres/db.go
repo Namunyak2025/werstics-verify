@@ -25,7 +25,7 @@ func NewPool(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 		cfg.MaxConns = 10
 	}
 
-	if cfg.MinConns < 0 {
+	if cfg.MinConns <= 0 {
 		cfg.MinConns = 1
 	}
 

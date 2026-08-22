@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -20,8 +21,13 @@ const (
 	permissionAuditRead     = "audit:read"
 )
 
+type ReadinessChecker interface {
+	Ping(context.Context) error
+}
+
 type Server struct {
 	payments  *payments.Service
+	readiness ReadinessChecker
 	auth      *auth.Service
 	rbac      auth.PermissionChecker
 	audit     *audit.Service
@@ -67,10 +73,17 @@ type loginRequest struct {
 	Password       string `json:"password"`
 }
 
+func (s *Server) SetReadinessChecker(
+	checker ReadinessChecker,
+) {
+	s.readiness = checker
+}
+
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/health", s.health)
+	mux.HandleFunc("/health/live", s.healthLive)
+	mux.HandleFunc("/health/ready", s.healthReady)
 	mux.HandleFunc("/v1/auth/register", s.register)
 	mux.HandleFunc("/v1/auth/login", s.login)
 
@@ -102,6 +115,48 @@ func (s *Server) Routes() http.Handler {
 	)
 
 	return mux
+}
+
+func (s *Server) healthLive(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	writeJSON(
+		w,
+		http.StatusOK,
+		map[string]string{"status": "ok"},
+	)
+}
+
+func (s *Server) healthReady(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.readiness == nil {
+		http.Error(w, "readiness check unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	if err := s.readiness.Ping(r.Context()); err != nil {
+		http.Error(w, "database not ready", http.StatusServiceUnavailable)
+		return
+	}
+
+	writeJSON(
+		w,
+		http.StatusOK,
+		map[string]string{"status": "ready"},
+	)
 }
 
 func (s *Server) auditHandler(
