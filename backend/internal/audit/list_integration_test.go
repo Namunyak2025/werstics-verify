@@ -35,6 +35,24 @@ func TestAuditListIsOrganizationScoped(t *testing.T) {
 	}
 
 	repository := postgres.NewAuditRepository(pool)
+	service := audit.NewService(repository)
+
+	err = service.Record(
+		ctx,
+		audit.Event{
+			OrganizationID: "11111111-1111-4111-8111-111111111111",
+			ActorType:      audit.ActorTypeSystem,
+			Action:         "test.audit_list",
+			ResourceType:   "test",
+			ResourceID:     "audit-list-test",
+			Metadata: map[string]any{
+				"test": true,
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("create audit fixture: %v", err)
+	}
 
 	records, total, err := repository.List(
 		ctx,

@@ -34,6 +34,7 @@ func TestAuditActorTypeUser(t *testing.T) {
 	}
 
 	ensureTestOrganization(t, ctx, pool)
+	ensureTestUser(t, ctx, pool)
 
 	repository := postgres.NewAuditRepository(pool)
 	service := audit.NewService(repository)
@@ -175,6 +176,45 @@ func TestAuditActorTypeSystem(t *testing.T) {
 	}
 
 	cleanupAuditActorTest(t, ctx, pool, resourceID)
+}
+
+func ensureTestUser(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+) {
+	t.Helper()
+
+	_, err := pool.Exec(
+		ctx,
+		`
+		INSERT INTO users (
+			id,
+			organization_id,
+			email,
+			password_hash,
+			display_name,
+			status
+		)
+		VALUES (
+			$1::uuid,
+			$2::uuid,
+			$3,
+			$4,
+			$5,
+			'active'
+		)
+		ON CONFLICT (id) DO NOTHING
+		`,
+		"86b922e8-d3bd-479b-8a53-0302e51b0ba1",
+		auditActorTestOrganizationID,
+		"audit-actor-test@example.invalid",
+		"test-password-hash",
+		"Audit Actor Test User",
+	)
+	if err != nil {
+		t.Fatalf("create test user: %v", err)
+	}
 }
 
 func ensureTestOrganization(

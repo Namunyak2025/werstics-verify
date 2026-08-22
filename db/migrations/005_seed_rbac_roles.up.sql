@@ -8,6 +8,18 @@ DECLARE
     operator_role UUID;
     viewer_role UUID;
 BEGIN
+    INSERT INTO organizations (
+        id,
+        name,
+        status
+    )
+    VALUES (
+        org_id,
+        'Werstics Verify',
+        'active'
+    )
+    ON CONFLICT (id) DO NOTHING;
+
     INSERT INTO roles (id, organization_id, name)
     VALUES (gen_random_uuid(), org_id, 'owner')
     ON CONFLICT (organization_id, name)
