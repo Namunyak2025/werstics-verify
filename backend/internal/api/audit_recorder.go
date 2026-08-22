@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/Namunyak2025/werstics-verify/backend/internal/audit"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/auth"
@@ -30,7 +31,7 @@ func (r *auditPermissionRecorder) RecordDenied(
 		return
 	}
 
-	_ = r.service.Record(
+	if err := r.service.Record(
 		ctx,
 		audit.Event{
 			OrganizationID: user.OrganizationID,
@@ -42,5 +43,15 @@ func (r *auditPermissionRecorder) RecordDenied(
 				"permission": permission,
 			},
 		},
-	)
+	); err != nil {
+		slog.Error(
+			"audit write failed",
+			"action", "permission.denied",
+			"resource_type", resourceType,
+			"resource_id", resourceID,
+			"organization_id", user.OrganizationID,
+			"actor_user_id", user.ID,
+			"error", err,
+		)
+	}
 }
