@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Namunyak2025/werstics-verify/backend/internal/audit"
+	"github.com/Namunyak2025/werstics-verify/backend/internal/domain"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/providers"
 )
 
@@ -68,12 +69,14 @@ func (s *Server) providerWebhook(
 		headers[key] = values[0]
 	}
 
-	payment, err := s.ingestion.Ingest(
+	result, err := s.ingestion.IngestDetailed(
 		r.Context(),
 		provider,
 		body,
 		headers,
 	)
+
+	payment := result.Payment
 	if err != nil {
 		slog.Warn(
 			"provider webhook rejected",
@@ -119,26 +122,76 @@ func (s *Server) providerWebhook(
 		return
 	}
 
-	_ = s.recordAudit(
-		r,
-		audit.Event{
-			OrganizationID: payment.OrganizationID,
-			ActorType:      audit.ActorTypeSystem,
-			Action:         "webhook.accepted",
-			ResourceType:   "payment",
-			ResourceID:     payment.ID,
-			Metadata: map[string]any{
-				"provider": payment.Provider,
+	switch result.Disposition {
+	case domain.EventDispositionDuplicate:
+		_ = s.recordAudit(
+			r,
+			audit.Event{
+				OrganizationID: payment.OrganizationID,
+				ActorType:      audit.ActorTypeSystem,
+				Action:         "webhook.duplicate",
+				ResourceType:   "payment",
+				ResourceID:     payment.ID,
+				Metadata: map[string]any{
+					"provider": result.Event.Provider,
+				},
 			},
-		},
-	)
+		)
 
-	writeJSON(
-		w,
-		http.StatusOK,
-		map[string]any{
-			"status":     "accepted",
-			"payment_id": payment.ID,
-		},
-	)
+		writeJSON(
+			w,
+			http.StatusOK,
+			map[string]any{
+				"status":     "duplicate",
+				"payment_id": payment.ID,
+			},
+		)
+		return
+
+	case domain.EventDispositionConflict:
+		_ = s.recordAudit(
+			r,
+			audit.Event{
+				OrganizationID: payment.OrganizationID,
+				ActorType:      audit.ActorTypeSystem,
+				Action:         "webhook.conflict",
+				ResourceType:   "payment",
+				ResourceID:     payment.ID,
+				Metadata: map[string]any{
+					"provider": result.Event.Provider,
+				},
+			},
+		)
+
+		http.Error(
+			w,
+			"provider webhook conflict",
+			http.StatusConflict,
+		)
+		return
+
+	default:
+		_ = s.recordAudit(
+			r,
+			audit.Event{
+				OrganizationID: payment.OrganizationID,
+				ActorType:      audit.ActorTypeSystem,
+				Action:         "webhook.accepted",
+				ResourceType:   "payment",
+				ResourceID:     payment.ID,
+				Metadata: map[string]any{
+					"provider": result.Event.Provider,
+				},
+			},
+		)
+
+		writeJSON(
+			w,
+			http.StatusOK,
+			map[string]any{
+				"status":     "accepted",
+				"payment_id": payment.ID,
+			},
+		)
+	}
 }
