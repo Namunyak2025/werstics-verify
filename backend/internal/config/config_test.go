@@ -81,3 +81,24 @@ func TestLoadRejectsDatabaseURLWithoutHost(t *testing.T) {
 		t.Fatal("expected missing database host to fail")
 	}
 }
+
+func TestLoadReadsSimulatorSecret(t *testing.T) {
+	t.Setenv(
+		"WERSTICS_VERIFY_DATABASE_URL",
+		"postgres://user:secret@localhost:5432/werstics_verify",
+	)
+	t.Setenv("WERSTICS_VERIFY_ADDR", "")
+	t.Setenv("WERSTICS_VERIFY_SIMULATOR_SECRET", "simulator-secret")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if cfg.SimulatorSecret != "simulator-secret" {
+		t.Fatalf(
+			"expected simulator secret to be loaded, got %q",
+			cfg.SimulatorSecret,
+		)
+	}
+}
