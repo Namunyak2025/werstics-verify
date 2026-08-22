@@ -477,3 +477,132 @@ func processingStatus(match verification.MatchResult) string {
 
 	return "rejected"
 }
+
+func (r *Repository) ListPayments(
+	ctx context.Context,
+	filter domain.PaymentFilter,
+) ([]domain.Payment, int, error) {
+	const baseQuery = `
+		FROM payments
+		WHERE organization_id = $1::uuid
+		  AND ($2 = '' OR status = $2)
+		  AND ($3 = '' OR provider = $3)
+		  AND ($4 = '' OR merchant_id = $4)
+		  AND ($5 = '' OR provider_ref = $5)
+		  AND (
+			$6 = ''
+			OR payment_id ILIKE '%' || $6 || '%'
+			OR merchant_id ILIKE '%' || $6 || '%'
+			OR provider_ref ILIKE '%' || $6 || '%'
+			OR COALESCE(customer_display, '') ILIKE '%' || $6 || '%'
+		  )
+	`
+
+	var total int
+
+	if err := r.db.QueryRow(
+		ctx,
+		`SELECT COUNT(*) `+baseQuery,
+		filter.OrganizationID,
+		filter.Status,
+		filter.Provider,
+		filter.MerchantID,
+		filter.ProviderRef,
+		filter.Search,
+	).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count payments: %w", err)
+	}
+
+	offset := (filter.Page - 1) * filter.PageSize
+
+	rows, err := r.db.Query(
+		ctx,
+		`
+		SELECT
+			payment_id,
+			organization_id::text,
+			merchant_id,
+			session_id,
+			provider,
+			COALESCE(provider_ref, ''),
+			expected_currency,
+			expected_minor,
+			received_currency,
+			received_minor,
+			COALESCE(customer_display, ''),
+			status,
+			created_at,
+			updated_at
+		`+baseQuery+`
+		ORDER BY created_at DESC, payment_id DESC
+		LIMIT $7
+		OFFSET $8
+		`,
+		filter.OrganizationID,
+		filter.Status,
+		filter.Provider,
+		filter.MerchantID,
+		filter.ProviderRef,
+		filter.Search,
+		filter.PageSize,
+		offset,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list payments: %w", err)
+	}
+	defer rows.Close()
+
+	result := make([]domain.Payment, 0, filter.PageSize)
+
+	for rows.Next() {
+		var (
+			payment          domain.Payment
+			expectedCurrency string
+			expectedMinor    int64
+			receivedCurrency *string
+			receivedMinor    *int64
+			status           string
+		)
+
+		if err := rows.Scan(
+			&payment.ID,
+			&payment.OrganizationID,
+			&payment.MerchantID,
+			&payment.SessionID,
+			&payment.Provider,
+			&payment.ProviderRef,
+			&expectedCurrency,
+			&expectedMinor,
+			&receivedCurrency,
+			&receivedMinor,
+			&payment.CustomerDisplay,
+			&status,
+			&payment.CreatedAt,
+			&payment.UpdatedAt,
+		); err != nil {
+			return nil, 0, fmt.Errorf("scan payment: %w", err)
+		}
+
+		payment.Expected = domain.Money{
+			Currency: expectedCurrency,
+			Minor:    expectedMinor,
+		}
+
+		payment.Status = domain.PaymentStatus(status)
+
+		if receivedCurrency != nil && receivedMinor != nil {
+			payment.Received = &domain.Money{
+				Currency: *receivedCurrency,
+				Minor:    *receivedMinor,
+			}
+		}
+
+		result = append(result, payment)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate payments: %w", err)
+	}
+
+	return result, total, nil
+}

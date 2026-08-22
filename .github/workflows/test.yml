@@ -7,9 +7,52 @@ on:
 jobs:
   go-test:
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: werstics_verify
+          POSTGRES_PASSWORD: namunyak
+          POSTGRES_DB: werstics_verify
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U werstics_verify -d werstics_verify"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      WERSTICS_VERIFY_DATABASE_URL: postgres://werstics_verify:namunyak@localhost:5432/werstics_verify?sslmode=disable
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
-      - run: go test ./...
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Apply database migrations
+        run: |
+          set -e
+          for migration in db/migrations/*_*.up.sql; do
+            echo "Applying $migration"
+            PGPASSWORD=namunyak psql \
+              -h localhost \
+              -U werstics_verify \
+              -d werstics_verify \
+              -v ON_ERROR_STOP=1 \
+              -f "$migration"
+          done
+
+      - name: Run Go tests
+        run: go test ./...
+
+      - name: Run Go vet
+        run: go vet ./...
