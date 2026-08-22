@@ -289,3 +289,134 @@ func ensureOrganization(
 		)
 	}
 }
+
+func TestRegisterFirstUserReceivesOwnerRoleAndLaterUserDoesNot(
+	t *testing.T,
+) {
+	databaseURL := os.Getenv("WERSTICS_VERIFY_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("WERSTICS_VERIFY_DATABASE_URL is not set")
+	}
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		15*time.Second,
+	)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Fatalf("ping database: %v", err)
+	}
+
+	organizationID := fmt.Sprintf(
+		"bbbbbbbb-bbbb-4bbb-8bbb-%012d",
+		time.Now().UnixNano()%1000000000000,
+	)
+
+	_, err = pool.Exec(
+		ctx,
+		`
+		INSERT INTO organizations (id, name, status)
+		VALUES ($1::uuid, $2, 'active')
+		`,
+		organizationID,
+		"RBAC Provisioning Test Organization",
+	)
+	if err != nil {
+		t.Fatalf("create organization: %v", err)
+	}
+
+	repository := postgres.NewAuthRepository(pool)
+	service := auth.NewService(repository)
+
+	firstEmail := fmt.Sprintf(
+		"first-%d@example.invalid",
+		time.Now().UnixNano(),
+	)
+
+	first, err := service.Register(
+		ctx,
+		organizationID,
+		firstEmail,
+		"First-User-Password",
+		"First User",
+	)
+	if err != nil {
+		t.Fatalf("register first user: %v", err)
+	}
+
+	var ownerCount int
+
+	err = pool.QueryRow(
+		ctx,
+		`
+		SELECT COUNT(*)
+		FROM user_roles ur
+		JOIN roles r ON r.id = ur.role_id
+		WHERE ur.user_id = $1::uuid
+		  AND r.organization_id = $2::uuid
+		  AND r.name = 'owner'
+		`,
+		first.ID,
+		organizationID,
+	).Scan(&ownerCount)
+	if err != nil {
+		t.Fatalf("check first owner role: %v", err)
+	}
+
+	if ownerCount != 1 {
+		t.Fatalf("expected first user to receive owner role, got %d", ownerCount)
+	}
+
+	secondEmail := fmt.Sprintf(
+		"second-%d@example.invalid",
+		time.Now().UnixNano(),
+	)
+
+	second, err := service.Register(
+		ctx,
+		organizationID,
+		secondEmail,
+		"Second-User-Password",
+		"Second User",
+	)
+	if err != nil {
+		t.Fatalf("register second user: %v", err)
+	}
+
+	var secondRoleCount int
+
+	err = pool.QueryRow(
+		ctx,
+		`
+		SELECT COUNT(*)
+		FROM user_roles
+		WHERE user_id = $1::uuid
+		`,
+		second.ID,
+	).Scan(&secondRoleCount)
+	if err != nil {
+		t.Fatalf("check second user roles: %v", err)
+	}
+
+	if secondRoleCount != 0 {
+		t.Fatalf(
+			"expected later user to receive no implicit roles, got %d",
+			secondRoleCount,
+		)
+	}
+
+	t.Cleanup(func() {
+		_, _ = pool.Exec(
+			context.Background(),
+			"DELETE FROM organizations WHERE id = $1::uuid",
+			organizationID,
+		)
+	})
+}
