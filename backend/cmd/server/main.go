@@ -14,7 +14,9 @@ import (
 	"github.com/Namunyak2025/werstics-verify/backend/internal/audit"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/auth"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/config"
+	"github.com/Namunyak2025/werstics-verify/backend/internal/ingestion"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/payments"
+	"github.com/Namunyak2025/werstics-verify/backend/internal/providers"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/storage/postgres"
 )
 
@@ -52,6 +54,15 @@ func main() {
 	auditRepository := postgres.NewAuditRepository(pool)
 	auditService := audit.NewService(auditRepository)
 
+	providerRegistry := providers.NewRegistry(
+		providers.NewSimulatorAdapter(cfg.SimulatorSecret),
+	)
+
+	ingestionService := ingestion.NewService(
+		providerRegistry,
+		paymentService,
+	)
+
 	server := api.NewServer(
 		paymentService,
 		authService,
@@ -59,6 +70,7 @@ func main() {
 		auditService,
 	)
 	server.SetReadinessChecker(pool)
+	server.SetProviderIngestion(ingestionService)
 
 	httpServer := &http.Server{
 		Addr:              cfg.Addr,

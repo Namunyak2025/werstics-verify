@@ -25,9 +25,19 @@ type ReadinessChecker interface {
 	Ping(context.Context) error
 }
 
+type ProviderIngestion interface {
+	Ingest(
+		ctx context.Context,
+		provider string,
+		payload []byte,
+		headers map[string]string,
+	) (domain.Payment, error)
+}
+
 type Server struct {
 	payments  *payments.Service
 	readiness ReadinessChecker
+	ingestion ProviderIngestion
 	auth      *auth.Service
 	rbac      auth.PermissionChecker
 	audit     *audit.Service
@@ -79,6 +89,12 @@ func (s *Server) SetReadinessChecker(
 	s.readiness = checker
 }
 
+func (s *Server) SetProviderIngestion(
+	service ProviderIngestion,
+) {
+	s.ingestion = service
+}
+
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 
@@ -86,6 +102,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/health/ready", s.healthReady)
 	mux.HandleFunc("/v1/auth/register", s.register)
 	mux.HandleFunc("/v1/auth/login", s.login)
+
+	mux.HandleFunc(
+		"/v1/providers/",
+		s.providerWebhook,
+	)
 
 	protected := auth.Middleware(s.auth)
 

@@ -8,14 +8,16 @@ import (
 )
 
 type Config struct {
-	Addr        string
-	DatabaseURL string
+	Addr            string
+	DatabaseURL     string
+	SimulatorSecret string
 }
 
 func Load() (Config, error) {
 	cfg := Config{
-		Addr:        strings.TrimSpace(os.Getenv("WERSTICS_VERIFY_ADDR")),
-		DatabaseURL: strings.TrimSpace(os.Getenv("WERSTICS_VERIFY_DATABASE_URL")),
+		Addr:            strings.TrimSpace(os.Getenv("WERSTICS_VERIFY_ADDR")),
+		DatabaseURL:     strings.TrimSpace(os.Getenv("WERSTICS_VERIFY_DATABASE_URL")),
+		SimulatorSecret: strings.TrimSpace(os.Getenv("WERSTICS_VERIFY_SIMULATOR_SECRET")),
 	}
 
 	if cfg.Addr == "" {
