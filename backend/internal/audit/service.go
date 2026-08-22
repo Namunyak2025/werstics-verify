@@ -28,6 +28,61 @@ type Event struct {
 
 type Repository interface {
 	Record(ctx context.Context, event Event) error
+	List(
+		ctx context.Context,
+		filter Filter,
+	) ([]Record, int, error)
+}
+
+type Filter struct {
+	OrganizationID string
+	Action         string
+	ResourceType   string
+	ResourceID     string
+	ActorType      string
+	Search         string
+	Page           int
+	PageSize       int
+}
+
+type Record struct {
+	ID             string
+	OrganizationID string
+	ActorUserID    string
+	ActorType      string
+	Action         string
+	ResourceType   string
+	ResourceID     string
+	Metadata       map[string]any
+	CreatedAt      time.Time
+}
+
+func (s *Service) List(
+	ctx context.Context,
+	filter Filter,
+) ([]Record, int, error) {
+	if filter.Page < 1 {
+		filter.Page = 1
+	}
+
+	if filter.PageSize < 1 {
+		filter.PageSize = 25
+	}
+
+	if filter.PageSize > 100 {
+		filter.PageSize = 100
+	}
+
+	if filter.OrganizationID == "" {
+		return nil, 0, fmt.Errorf("organization id is required")
+	}
+
+	records, total, err := s.repo.List(ctx, filter)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list audit records: %w", err)
+	}
+
+	return records, total, nil
 }
 
 type Service struct {

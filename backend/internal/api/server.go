@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -15,6 +16,7 @@ const (
 	permissionPaymentCreate = "payment:create"
 	permissionPaymentRead   = "payment:read"
 	permissionPaymentVerify = "payment:verify"
+	permissionAuditRead     = "audit:read"
 )
 
 type Server struct {
@@ -85,15 +87,12 @@ func (s *Server) Routes() http.Handler {
 
 	mux.Handle(
 		"/v1/payments",
-		protected(
-			auth.RequirePermission(
-				s.rbac,
-				s.permAudit,
-				permissionPaymentCreate,
-				"payment",
-				http.HandlerFunc(s.paymentsHandler),
-			),
-		),
+		protected(http.HandlerFunc(s.paymentsHandler)),
+	)
+
+	mux.Handle(
+		"/v1/audit",
+		protected(http.HandlerFunc(s.auditHandler)),
 	)
 
 	mux.Handle(
@@ -102,6 +101,142 @@ func (s *Server) Routes() http.Handler {
 	)
 
 	return mux
+}
+
+func (s *Server) auditHandler(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	if r.Method != http.MethodGet {
+		http.Error(
+			w,
+			"method not allowed",
+			http.StatusMethodNotAllowed,
+		)
+		return
+	}
+
+	user, ok := auth.CurrentUser(r.Context())
+	if !ok {
+		http.Error(
+			w,
+			"authentication required",
+			http.StatusUnauthorized,
+		)
+		return
+	}
+
+	allowed, err := s.rbac.HasPermission(
+		r.Context(),
+		user.ID,
+		permissionAuditRead,
+	)
+	if err != nil {
+		http.Error(
+			w,
+			"authorization check failed",
+			http.StatusInternalServerError,
+		)
+		return
+	}
+
+	if !allowed {
+		_ = s.recordAudit(
+			r,
+			audit.Event{
+				OrganizationID: user.OrganizationID,
+				ActorUserID:    user.ID,
+				Action:         "audit.read_denied",
+				ResourceType:   "audit_log",
+				Metadata: map[string]any{
+					"reason": "permission_denied",
+				},
+			},
+		)
+
+		http.Error(
+			w,
+			"permission denied",
+			http.StatusForbidden,
+		)
+		return
+	}
+
+	query := r.URL.Query()
+
+	page := 1
+	pageSize := 25
+
+	if raw := query.Get("page"); raw != "" {
+		if _, err := fmt.Sscanf(raw, "%d", &page); err != nil || page < 1 {
+			http.Error(w, "invalid page", http.StatusBadRequest)
+			return
+		}
+	}
+
+	if raw := query.Get("page_size"); raw != "" {
+		if _, err := fmt.Sscanf(raw, "%d", &pageSize); err != nil {
+			http.Error(w, "invalid page_size", http.StatusBadRequest)
+			return
+		}
+	}
+
+	if pageSize < 1 || pageSize > 100 {
+		http.Error(
+			w,
+			"page_size must be between 1 and 100",
+			http.StatusBadRequest,
+		)
+		return
+	}
+
+	records, total, err := s.audit.List(
+		r.Context(),
+		audit.Filter{
+			OrganizationID: user.OrganizationID,
+			Action:         query.Get("action"),
+			ResourceType:   query.Get("resource_type"),
+			ResourceID:     query.Get("resource_id"),
+			ActorType:      query.Get("actor_type"),
+			Search:         query.Get("search"),
+			Page:           page,
+			PageSize:       pageSize,
+		},
+	)
+	if err != nil {
+		http.Error(
+			w,
+			"failed to list audit records",
+			http.StatusInternalServerError,
+		)
+		return
+	}
+
+	_ = s.recordAudit(
+		r,
+		audit.Event{
+			OrganizationID: user.OrganizationID,
+			ActorUserID:    user.ID,
+			Action:         "audit.list",
+			ResourceType:   "audit_log",
+			Metadata: map[string]any{
+				"page":      page,
+				"page_size": pageSize,
+				"total":     total,
+			},
+		},
+	)
+
+	writeJSON(
+		w,
+		http.StatusOK,
+		map[string]any{
+			"records":   records,
+			"page":      page,
+			"page_size": pageSize,
+			"total":     total,
+		},
+	)
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -314,15 +449,190 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
-func (s *Server) paymentsHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+func (s *Server) paymentsHandler(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	user, ok := auth.CurrentUser(r.Context())
+	if !ok {
+		http.Error(
+			w,
+			"authentication required",
+			http.StatusUnauthorized,
+		)
 		return
 	}
 
-	user, ok := auth.CurrentUser(r.Context())
-	if !ok {
-		http.Error(w, "authentication required", http.StatusUnauthorized)
+	switch r.Method {
+	case http.MethodGet:
+		s.listPayments(w, r, user)
+	case http.MethodPost:
+		s.createPayment(w, r, user)
+	default:
+		http.Error(
+			w,
+			"method not allowed",
+			http.StatusMethodNotAllowed,
+		)
+	}
+}
+
+func (s *Server) listPayments(
+	w http.ResponseWriter,
+	r *http.Request,
+	user auth.User,
+) {
+	allowed, err := s.rbac.HasPermission(
+		r.Context(),
+		user.ID,
+		permissionPaymentRead,
+	)
+	if err != nil {
+		http.Error(
+			w,
+			"authorization check failed",
+			http.StatusInternalServerError,
+		)
+		return
+	}
+
+	if !allowed {
+		_ = s.recordAudit(
+			r,
+			audit.Event{
+				OrganizationID: user.OrganizationID,
+				ActorUserID:    user.ID,
+				Action:         "payment.list_denied",
+				ResourceType:   "payment",
+				Metadata: map[string]any{
+					"reason": "permission_denied",
+				},
+			},
+		)
+
+		http.Error(
+			w,
+			"permission denied",
+			http.StatusForbidden,
+		)
+		return
+	}
+
+	query := r.URL.Query()
+
+	page := 1
+	pageSize := 25
+
+	if raw := query.Get("page"); raw != "" {
+		if _, err := fmt.Sscanf(raw, "%d", &page); err != nil || page < 1 {
+			http.Error(w, "invalid page", http.StatusBadRequest)
+			return
+		}
+	}
+
+	if raw := query.Get("page_size"); raw != "" {
+		if _, err := fmt.Sscanf(raw, "%d", &pageSize); err != nil {
+			http.Error(w, "invalid page_size", http.StatusBadRequest)
+			return
+		}
+	}
+
+	if pageSize < 1 || pageSize > 100 {
+		http.Error(
+			w,
+			"page_size must be between 1 and 100",
+			http.StatusBadRequest,
+		)
+		return
+	}
+
+	items, total, err := s.payments.List(
+		r.Context(),
+		domain.PaymentFilter{
+			OrganizationID: user.OrganizationID,
+			Status:         query.Get("status"),
+			Provider:       query.Get("provider"),
+			MerchantID:     query.Get("merchant_id"),
+			ProviderRef:    query.Get("provider_ref"),
+			Search:         query.Get("search"),
+			Page:           page,
+			PageSize:       pageSize,
+		},
+	)
+	if err != nil {
+		http.Error(
+			w,
+			"failed to list payments",
+			http.StatusInternalServerError,
+		)
+		return
+	}
+
+	_ = s.recordAudit(
+		r,
+		audit.Event{
+			OrganizationID: user.OrganizationID,
+			ActorUserID:    user.ID,
+			Action:         "payment.list",
+			ResourceType:   "payment",
+			Metadata: map[string]any{
+				"page":      page,
+				"page_size": pageSize,
+				"total":     total,
+			},
+		},
+	)
+
+	writeJSON(
+		w,
+		http.StatusOK,
+		map[string]any{
+			"payments":  items,
+			"page":      page,
+			"page_size": pageSize,
+			"total":     total,
+		},
+	)
+}
+
+func (s *Server) createPayment(
+	w http.ResponseWriter,
+	r *http.Request,
+	user auth.User,
+) {
+	allowed, err := s.rbac.HasPermission(
+		r.Context(),
+		user.ID,
+		permissionPaymentCreate,
+	)
+	if err != nil {
+		http.Error(
+			w,
+			"authorization check failed",
+			http.StatusInternalServerError,
+		)
+		return
+	}
+
+	if !allowed {
+		_ = s.recordAudit(
+			r,
+			audit.Event{
+				OrganizationID: user.OrganizationID,
+				ActorUserID:    user.ID,
+				Action:         "payment.create_denied",
+				ResourceType:   "payment",
+				Metadata: map[string]any{
+					"reason": "permission_denied",
+				},
+			},
+		)
+
+		http.Error(
+			w,
+			"permission denied",
+			http.StatusForbidden,
+		)
 		return
 	}
 
@@ -348,7 +658,11 @@ func (s *Server) paymentsHandler(w http.ResponseWriter, r *http.Request) {
 			},
 		)
 
-		http.Error(w, "organization access denied", http.StatusForbidden)
+		http.Error(
+			w,
+			"organization access denied",
+			http.StatusForbidden,
+		)
 		return
 	}
 
