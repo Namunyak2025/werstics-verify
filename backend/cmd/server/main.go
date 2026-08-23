@@ -58,9 +58,12 @@ func main() {
 		providers.NewSimulatorAdapter(cfg.SimulatorSecret),
 	)
 
+	failureRepository := postgres.NewProviderEventFailureRepository(pool)
+
 	ingestionService := ingestion.NewService(
 		providerRegistry,
 		paymentService,
+		failureRepository,
 	)
 
 	server := api.NewServer(
@@ -71,6 +74,7 @@ func main() {
 	)
 	server.SetReadinessChecker(pool)
 	server.SetProviderIngestion(ingestionService)
+	server.SetProviderFailureRepository(failureRepository)
 
 	httpServer := &http.Server{
 		Addr:              cfg.Addr,

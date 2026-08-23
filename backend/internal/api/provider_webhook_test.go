@@ -60,6 +60,16 @@ func (f *fakeProviderIngestion) IngestDetailed(
 	}, f.err
 }
 
+func (f *fakeProviderIngestion) RetryFailure(
+	ctx context.Context,
+	id string,
+	organizationID string,
+) (ingestion.Result, error) {
+	return ingestion.Result{
+		Payment: f.payment,
+	}, f.err
+}
+
 func newWebhookServer(
 	ingestion api.ProviderIngestion,
 ) *httptest.Server {

@@ -11,7 +11,7 @@ import (
 )
 
 func TestServiceRejectsMissingProvider(t *testing.T) {
-	service := ingestion.NewService(nil, nil)
+	service := ingestion.NewService(nil, nil, nil)
 
 	_, err := service.Ingest(
 		context.Background(),
@@ -26,7 +26,7 @@ func TestServiceRejectsMissingProvider(t *testing.T) {
 
 func TestServiceRejectsUnknownProvider(t *testing.T) {
 	registry := providers.NewRegistry()
-	service := ingestion.NewService(registry, nil)
+	service := ingestion.NewService(registry, nil, nil)
 
 	_, err := service.Ingest(
 		context.Background(),
@@ -44,7 +44,7 @@ func TestServiceRejectsInvalidSignatureBeforeNormalization(t *testing.T) {
 		providers.NewSimulatorAdapter("secret"),
 	)
 
-	service := ingestion.NewService(registry, nil)
+	service := ingestion.NewService(registry, nil, nil)
 
 	_, err := service.Ingest(
 		context.Background(),
