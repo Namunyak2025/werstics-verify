@@ -81,9 +81,12 @@ func TestProviderWebhookEndToEnd(t *testing.T) {
 		providers.NewSimulatorAdapter(secret),
 	)
 
+	failureRepository := postgres.NewProviderEventFailureRepository(pool)
+
 	ingestionService := ingestion.NewService(
 		registry,
 		paymentService,
+		failureRepository,
 	)
 
 	server := api.NewServer(
@@ -218,4 +221,242 @@ func TestProviderWebhookEndToEnd(t *testing.T) {
 			paymentID,
 		)
 	})
+}
+
+func TestProviderWebhookFailurePersistsForRecovery(t *testing.T) {
+	databaseURL := os.Getenv("WERSTICS_VERIFY_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("WERSTICS_VERIFY_DATABASE_URL is not set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Fatalf("ping database: %v", err)
+	}
+
+	const organizationID = "77777777-7777-4777-8777-777777777777"
+
+	_, err = pool.Exec(
+		ctx,
+		`
+		INSERT INTO organizations (id, name, status)
+		VALUES ($1::uuid, $2, 'active')
+		ON CONFLICT (id) DO NOTHING
+		`,
+		organizationID,
+		"Werstics Verify Provider Recovery Tests",
+	)
+	if err != nil {
+		t.Fatalf("create organization: %v", err)
+	}
+
+	paymentRepository := postgres.NewRepository(pool)
+	paymentService := payments.NewService(paymentRepository)
+
+	now := time.Now().UTC()
+	paymentID := fmt.Sprintf("pay-recovery-%d", time.Now().UnixNano())
+
+	payment := domain.Payment{
+		ID:             paymentID,
+		OrganizationID: organizationID,
+		MerchantID:     "merchant-recovery",
+		SessionID:      "session-recovery",
+		Provider:       "simulator",
+		ProviderRef:    "recovery-order",
+		Expected: domain.Money{
+			Currency: "KES",
+			Minor:    1500,
+		},
+		Status:    domain.StatusRequested,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	if err := paymentRepository.CreatePayment(ctx, payment); err != nil {
+		t.Fatalf("create payment: %v", err)
+	}
+
+	t.Cleanup(func() {
+		_, _ = pool.Exec(
+			context.Background(),
+			`DELETE FROM provider_event_failures WHERE payment_id = (
+				SELECT id FROM payments WHERE payment_id = $1
+			)`,
+			paymentID,
+		)
+		_, _ = pool.Exec(
+			context.Background(),
+			`DELETE FROM payments WHERE payment_id = $1`,
+			paymentID,
+		)
+	})
+
+	// Move the payment to pending first. The next confirmed event will be
+	// deliberately malformed at the persistence boundary by using a stale
+	// state transition, which must roll back the payment-event transaction.
+	registry := providers.NewRegistry(
+		providers.NewSimulatorAdapter("recovery-test-secret"),
+	)
+	failureRepository := postgres.NewProviderEventFailureRepository(pool)
+
+	ingestionService := ingestion.NewService(
+		registry,
+		paymentService,
+		failureRepository,
+	)
+
+	pendingEvent := domain.PaymentEvent{
+		EventID:         fmt.Sprintf("recovery-pending-%d", time.Now().UnixNano()),
+		Provider:        "simulator",
+		ProviderEventID: fmt.Sprintf("recovery-provider-pending-%d", time.Now().UnixNano()),
+		PaymentID:       paymentID,
+		ProviderRef:     "recovery-order",
+		MerchantID:      "merchant-recovery",
+		Amount: domain.Money{
+			Currency: "KES",
+			Minor:    1500,
+		},
+		Kind:       "payment.pending",
+		OccurredAt: time.Now().UTC(),
+	}
+
+	adapter := providers.NewSimulatorAdapter("recovery-test-secret")
+	pendingPayload, err := json.Marshal(map[string]any{
+		"event_id":          pendingEvent.EventID,
+		"provider_event_id": pendingEvent.ProviderEventID,
+		"payment_id":        pendingEvent.PaymentID,
+		"provider_ref":      pendingEvent.ProviderRef,
+		"merchant_id":       pendingEvent.MerchantID,
+		"amount":            pendingEvent.Amount,
+		"kind":              pendingEvent.Kind,
+		"occurred_at":       pendingEvent.OccurredAt.Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		t.Fatalf("marshal pending payload: %v", err)
+	}
+
+	signature := sha256.Sum256(
+		append([]byte("recovery-test-secret"), pendingPayload...),
+	)
+
+	pendingResult, err := ingestionService.IngestDetailed(
+		ctx,
+		"simulator",
+		pendingPayload,
+		map[string]string{
+			"X-Werstics-Signature": hex.EncodeToString(signature[:]),
+		},
+	)
+	if err != nil {
+		t.Fatalf("pending event failed: %v", err)
+	}
+
+	if pendingResult.Payment.Status != domain.StatusPending {
+		t.Fatalf("expected pending status, got %s", pendingResult.Payment.Status)
+	}
+
+	// A duplicate provider identity with altered payload must become a
+	// conflict. This should not create a second payment event, while the
+	// conflict itself is an operational event only when processing reaches
+	// the payment repository.
+	conflictPayloadMap := map[string]any{
+		"event_id":          pendingEvent.EventID,
+		"provider_event_id": pendingEvent.ProviderEventID,
+		"payment_id":        pendingEvent.PaymentID,
+		"provider_ref":      pendingEvent.ProviderRef,
+		"merchant_id":       pendingEvent.MerchantID,
+		"amount": map[string]any{
+			"currency": "KES",
+			"minor":    9999,
+		},
+		"kind":        pendingEvent.Kind,
+		"occurred_at": pendingEvent.OccurredAt.Format(time.RFC3339Nano),
+	}
+
+	conflictPayload, err := json.Marshal(conflictPayloadMap)
+	if err != nil {
+		t.Fatalf("marshal conflict payload: %v", err)
+	}
+
+	conflictSignature := sha256.Sum256(
+		append([]byte("recovery-test-secret"), conflictPayload...),
+	)
+
+	_, err = ingestionService.IngestDetailed(
+		ctx,
+		"simulator",
+		conflictPayload,
+		map[string]string{
+			"X-Werstics-Signature": hex.EncodeToString(conflictSignature[:]),
+		},
+	)
+	if err == nil {
+		t.Fatal("expected conflict processing to fail")
+	}
+
+	var (
+		failureCount int
+		attempts     int
+		status       string
+	)
+
+	err = pool.QueryRow(
+		ctx,
+		`
+		SELECT COUNT(*), COALESCE(MAX(attempts), 0), COALESCE(MAX(status), '')
+		FROM provider_event_failures
+		WHERE payment_id = (
+			SELECT id FROM payments WHERE payment_id = $1
+		)
+		`,
+		paymentID,
+	).Scan(&failureCount, &attempts, &status)
+	if err != nil {
+		t.Fatalf("query provider failure ledger: %v", err)
+	}
+
+	if failureCount != 1 {
+		t.Fatalf("expected one provider failure, got %d", failureCount)
+	}
+
+	if attempts != 1 {
+		t.Fatalf("expected one failure attempt, got %d", attempts)
+	}
+
+	if status != "retryable" {
+		t.Fatalf("expected retryable failure, got %q", status)
+	}
+
+	var eventCount int
+	err = pool.QueryRow(
+		ctx,
+		`
+		SELECT COUNT(*)
+		FROM payment_events
+		WHERE payment_id = (
+			SELECT id FROM payments WHERE payment_id = $1
+		)
+		`,
+		paymentID,
+	).Scan(&eventCount)
+	if err != nil {
+		t.Fatalf("count payment events: %v", err)
+	}
+
+	if eventCount != 1 {
+		t.Fatalf(
+			"expected only the original pending event after rollback, got %d",
+			eventCount,
+		)
+	}
+
+	_ = adapter
 }

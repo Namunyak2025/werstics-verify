@@ -13,6 +13,7 @@ import (
 	"github.com/Namunyak2025/werstics-verify/backend/internal/domain"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/ingestion"
 	"github.com/Namunyak2025/werstics-verify/backend/internal/payments"
+	"github.com/Namunyak2025/werstics-verify/backend/internal/providers"
 )
 
 const (
@@ -33,12 +34,19 @@ type ProviderIngestion interface {
 		payload []byte,
 		headers map[string]string,
 	) (ingestion.Result, error)
+
+	RetryFailure(
+		ctx context.Context,
+		id string,
+		organizationID string,
+	) (ingestion.Result, error)
 }
 
 type Server struct {
 	payments  *payments.Service
 	readiness ReadinessChecker
 	ingestion ProviderIngestion
+	failures  providers.FailureRepository
 	auth      *auth.Service
 	rbac      auth.PermissionChecker
 	audit     *audit.Service
@@ -96,6 +104,12 @@ func (s *Server) SetProviderIngestion(
 	s.ingestion = service
 }
 
+func (s *Server) SetProviderFailureRepository(
+	repository providers.FailureRepository,
+) {
+	s.failures = repository
+}
+
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 
@@ -107,6 +121,18 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc(
 		"/v1/providers/",
 		s.providerWebhook,
+	)
+
+	protectedProviderFailures := auth.Middleware(s.auth)
+
+	mux.Handle(
+		"/v1/provider-failures",
+		protectedProviderFailures(http.HandlerFunc(s.providerFailuresHandler)),
+	)
+
+	mux.Handle(
+		"/v1/provider-failures/",
+		protectedProviderFailures(http.HandlerFunc(s.providerFailureActionHandler)),
 	)
 
 	protected := auth.Middleware(s.auth)
