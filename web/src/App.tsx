@@ -26,6 +26,7 @@ import {
   Zap,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import ProviderFailuresView from "./ProviderFailuresView";
 import {
   clearToken,
   createPayment,
@@ -47,6 +48,7 @@ type View =
   | "overview"
   | "payments"
   | "verify"
+  | "failures"
   | "security"
   | "settings";
 
@@ -181,7 +183,7 @@ function App() {
     ]);
 
     setUser(identity.user);
-    setPermissions(identity.permissions);
+    setPermissions(identity.permissions ?? []);
     setApiOnline(system.status === "ok");
 
     return identity;
@@ -671,6 +673,15 @@ function App() {
           </button>
 
           <button
+            className={view === "failures" ? "active" : ""}
+            onClick={() => setView("failures")}
+          >
+            <CircleAlert size={18} />
+            <span>Provider Failures</span>
+            {canVerify && <ChevronRight size={14} />}
+          </button>
+
+          <button
             className={view === "security" ? "active" : ""}
             onClick={() => {
               setView("security");
@@ -681,7 +692,7 @@ function App() {
             }}
           >
             <ShieldCheck size={18} />
-            <span>Security</span>
+            <span>Audit</span>
           </button>
 
           <button
@@ -689,7 +700,7 @@ function App() {
             onClick={() => setView("settings")}
           >
             <SlidersHorizontal size={18} />
-            <span>Settings</span>
+            <span>Administration</span>
           </button>
         </nav>
 
@@ -733,16 +744,18 @@ function App() {
               {view === "overview" && "Operational overview"}
               {view === "payments" && "Payment operations"}
               {view === "verify" && "Deterministic verification"}
-              {view === "security" && "Security boundary"}
-              {view === "settings" && "Workspace configuration"}
+              {view === "failures" && "Operational recovery"}
+              {view === "security" && "Security activity"}
+              {view === "settings" && "Administration"}
             </span>
 
             <h2>
               {view === "overview" && "Command center"}
               {view === "payments" && "Payment workspace"}
               {view === "verify" && "Verification desk"}
-              {view === "security" && "Identity & access"}
-              {view === "settings" && "Workspace settings"}
+              {view === "failures" && "Provider failure queue"}
+              {view === "security" && "Audit stream"}
+              {view === "settings" && "Organization administration"}
             </h2>
           </div>
 
@@ -1736,6 +1749,13 @@ function App() {
                 )}
               </article>
             </section>
+          )}
+
+          {view === "failures" && (
+            <ProviderFailuresView
+              canVerify={canVerify}
+              notify={notify}
+            />
           )}
 
           {view === "security" && (

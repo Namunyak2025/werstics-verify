@@ -136,7 +136,7 @@ export function health() {
   return request<{
     status: string;
     service: string;
-  }>("/health");
+  }>("/health/live");
 }
 
 
@@ -283,5 +283,72 @@ export function submitVerification(
         occurred_at: new Date().toISOString(),
       }),
     },
+  );
+}
+
+export type ProviderEventFailure = {
+  id: string;
+  provider: string;
+  provider_event_id: string;
+  event_id: string;
+  payment_id: string;
+  provider_ref?: string;
+  merchant_id: string;
+  amount_currency: string;
+  amount_minor: number;
+  customer_display?: string;
+  kind: string;
+  occurred_at: string;
+  status: string;
+  attempts: number;
+  last_error: string;
+  first_failed_at: string;
+  last_failed_at: string;
+  resolved_at?: string | null;
+};
+
+export type ProviderFailureListResponse = {
+  failures: ProviderEventFailure[];
+  page: number;
+  page_size: number;
+  total: number;
+};
+
+export function listProviderFailures(params: {
+  page?: number;
+  page_size?: number;
+  status?: string;
+} = {}) {
+  const query = new URLSearchParams();
+
+  if (params.page) query.set("page", String(params.page));
+  if (params.page_size) {
+    query.set("page_size", String(params.page_size));
+  }
+  if (params.status) query.set("status", params.status);
+
+  const suffix = query.toString()
+    ? `?${query.toString()}`
+    : "";
+
+  return request<ProviderFailureListResponse>(
+    `/v1/provider-failures${suffix}`,
+  );
+}
+
+export function retryProviderFailure(id: string) {
+  return request<{
+    status: string;
+    payment_id: string;
+  }>(
+    `/v1/provider-failures/${encodeURIComponent(id)}/retry`,
+    { method: "POST" },
+  );
+}
+
+export function resolveProviderFailure(id: string) {
+  return request<{ status: string }>(
+    `/v1/provider-failures/${encodeURIComponent(id)}/resolve`,
+    { method: "POST" },
   );
 }
