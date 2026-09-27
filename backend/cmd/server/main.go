@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,6 +23,50 @@ import (
 )
 
 const shutdownTimeout = 15 * time.Second
+
+func spaHandler(
+	apiHandler http.Handler,
+	distDir string,
+) http.Handler {
+	fileServer := http.FileServer(http.Dir(distDir))
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1" ||
+			strings.HasPrefix(r.URL.Path, "/v1/") ||
+			r.URL.Path == "/health" ||
+			strings.HasPrefix(r.URL.Path, "/health/") {
+			apiHandler.ServeHTTP(w, r)
+			return
+		}
+
+		requestPath := strings.TrimPrefix(r.URL.Path, "/")
+		cleanPath := filepath.Clean(requestPath)
+
+		if cleanPath != "." &&
+			cleanPath != ".." &&
+			!strings.HasPrefix(cleanPath, ".."+string(os.PathSeparator)) {
+			filePath := filepath.Join(distDir, cleanPath)
+
+			if info, err := os.Stat(filePath); err == nil && !info.IsDir() {
+				fileServer.ServeHTTP(w, r)
+				return
+			}
+		}
+
+		indexPath := filepath.Join(distDir, "index.html")
+
+		if _, err := os.Stat(indexPath); err != nil {
+			http.Error(
+				w,
+				"frontend assets unavailable",
+				http.StatusInternalServerError,
+			)
+			return
+		}
+
+		http.ServeFile(w, r, indexPath)
+	})
+}
 
 func main() {
 	cfg, err := config.Load()
@@ -72,13 +118,19 @@ func main() {
 		rbacRepository,
 		auditService,
 	)
+
 	server.SetReadinessChecker(pool)
 	server.SetProviderIngestion(ingestionService)
 	server.SetProviderFailureRepository(failureRepository)
 
+	apiHandler := server.Routes()
+
 	httpServer := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           server.Routes(),
+		Addr: cfg.Addr,
+		Handler: spaHandler(
+			apiHandler,
+			"web/dist",
+		),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
@@ -86,7 +138,10 @@ func main() {
 	serverErr := make(chan error, 1)
 
 	go func() {
-		log.Printf("Werstics Verify API listening on %s", cfg.Addr)
+		log.Printf(
+			"Werstics Verify server listening on %s",
+			cfg.Addr,
+		)
 
 		if err := httpServer.ListenAndServe(); err != nil &&
 			!errors.Is(err, http.ErrServerClosed) {
@@ -112,5 +167,5 @@ func main() {
 		log.Fatalf("HTTP server shutdown failed: %v", err)
 	}
 
-	log.Printf("Werstics Verify API stopped")
+	log.Printf("Werstics Verify server stopped")
 }
