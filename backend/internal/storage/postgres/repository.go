@@ -14,8 +14,9 @@ import (
 )
 
 var (
-	ErrNotFound       = errors.New("record not found")
-	ErrDuplicateEvent = errors.New("duplicate payment event")
+	ErrNotFound                  = errors.New("record not found")
+	ErrDuplicateEvent            = errors.New("duplicate payment event")
+	ErrAmbiguousPaymentReference = errors.New("payment reference is ambiguous")
 )
 
 type Repository struct {
@@ -578,6 +579,119 @@ func processingStatus(match verification.MatchResult) string {
 	}
 
 	return "rejected"
+}
+
+func (r *Repository) FindPaymentByProviderRef(
+	ctx context.Context,
+	provider string,
+	providerRef string,
+	merchantID string,
+) (domain.Payment, error) {
+	const query = `
+		SELECT
+			payment_id,
+			organization_id::text,
+			merchant_id,
+			session_id,
+			provider,
+			COALESCE(provider_ref, ''),
+			expected_currency,
+			expected_minor,
+			received_currency,
+			received_minor,
+			COALESCE(customer_display, ''),
+			status,
+			created_at,
+			updated_at
+		FROM payments
+		WHERE provider = $1
+		  AND provider_ref = $2
+		  AND merchant_id = $3
+		ORDER BY created_at DESC, payment_id DESC
+		LIMIT 2
+	`
+
+	rows, err := r.db.Query(
+		ctx,
+		query,
+		provider,
+		providerRef,
+		merchantID,
+	)
+	if err != nil {
+		return domain.Payment{}, fmt.Errorf(
+			"query payment by provider reference: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+
+	var matches []domain.Payment
+
+	for rows.Next() {
+		var (
+			payment          domain.Payment
+			expectedCurrency string
+			expectedMinor    int64
+			receivedCurrency *string
+			receivedMinor    *int64
+			status           string
+		)
+
+		if err := rows.Scan(
+			&payment.ID,
+			&payment.OrganizationID,
+			&payment.MerchantID,
+			&payment.SessionID,
+			&payment.Provider,
+			&payment.ProviderRef,
+			&expectedCurrency,
+			&expectedMinor,
+			&receivedCurrency,
+			&receivedMinor,
+			&payment.CustomerDisplay,
+			&status,
+			&payment.CreatedAt,
+			&payment.UpdatedAt,
+		); err != nil {
+			return domain.Payment{}, fmt.Errorf(
+				"scan payment by provider reference: %w",
+				err,
+			)
+		}
+
+		payment.Expected = domain.Money{
+			Currency: expectedCurrency,
+			Minor:    expectedMinor,
+		}
+
+		payment.Status = domain.PaymentStatus(status)
+
+		if receivedCurrency != nil && receivedMinor != nil {
+			payment.Received = &domain.Money{
+				Currency: *receivedCurrency,
+				Minor:    *receivedMinor,
+			}
+		}
+
+		matches = append(matches, payment)
+	}
+
+	if err := rows.Err(); err != nil {
+		return domain.Payment{}, fmt.Errorf(
+			"iterate payments by provider reference: %w",
+			err,
+		)
+	}
+
+	switch len(matches) {
+	case 0:
+		return domain.Payment{}, ErrNotFound
+	case 1:
+		return matches[0], nil
+	default:
+		return domain.Payment{}, ErrAmbiguousPaymentReference
+	}
 }
 
 func (r *Repository) ListPayments(

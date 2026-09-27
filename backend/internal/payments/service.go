@@ -12,6 +12,12 @@ import (
 type Repository interface {
 	CreatePayment(ctx context.Context, payment domain.Payment) error
 	GetPayment(ctx context.Context, paymentID string) (domain.Payment, error)
+	FindPaymentByProviderRef(
+		ctx context.Context,
+		provider string,
+		providerRef string,
+		merchantID string,
+	) (domain.Payment, error)
 	ListPayments(ctx context.Context, filter domain.PaymentFilter) ([]domain.Payment, int, error)
 	ApplyPaymentEvent(
 		ctx context.Context,
@@ -35,6 +41,40 @@ type Service struct {
 
 func NewService(repo Repository) *Service {
 	return &Service{repo: repo}
+}
+
+func (s *Service) FindByProviderRef(
+	ctx context.Context,
+	provider string,
+	providerRef string,
+	merchantID string,
+) (domain.Payment, error) {
+	if provider == "" {
+		return domain.Payment{}, fmt.Errorf("provider is required")
+	}
+
+	if providerRef == "" {
+		return domain.Payment{}, fmt.Errorf("provider reference is required")
+	}
+
+	if merchantID == "" {
+		return domain.Payment{}, fmt.Errorf("merchant id is required")
+	}
+
+	payment, err := s.repo.FindPaymentByProviderRef(
+		ctx,
+		provider,
+		providerRef,
+		merchantID,
+	)
+	if err != nil {
+		return domain.Payment{}, fmt.Errorf(
+			"find payment by provider reference: %w",
+			err,
+		)
+	}
+
+	return payment, nil
 }
 
 func (s *Service) List(

@@ -102,6 +102,7 @@ func main() {
 
 	providerRegistry := providers.NewRegistry(
 		providers.NewSimulatorAdapter(cfg.SimulatorSecret),
+		providers.NewC2BAdapter(),
 	)
 
 	failureRepository := postgres.NewProviderEventFailureRepository(pool)

@@ -83,6 +83,15 @@ func (f *fakePaymentRepository) ListPayments(
 	return []domain.Payment{f.payment}, 1, nil
 }
 
+func (f *fakePaymentRepository) FindPaymentByProviderRef(
+	_ context.Context,
+	_ string,
+	_ string,
+	_ string,
+) (domain.Payment, error) {
+	return f.payment, nil
+}
+
 func (f *fakePaymentRepository) ApplyPaymentEvent(
 	_ context.Context,
 	_ string,

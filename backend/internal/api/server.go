@@ -119,6 +119,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/v1/auth/login", s.login)
 
 	mux.HandleFunc(
+		"/v1/providers/c2b/validation",
+		s.c2bValidation,
+	)
+
+	mux.HandleFunc(
 		"/v1/providers/",
 		s.providerWebhook,
 	)

@@ -95,6 +95,30 @@ func (s *Service) IngestDetailed(
 	}
 
 	if event.PaymentID == "" {
+		if event.ProviderRef == "" || event.MerchantID == "" {
+			return Result{}, fmt.Errorf(
+				"%w: payment correlation requires provider_ref and merchant_id",
+				providers.ErrMalformedPayload,
+			)
+		}
+
+		payment, err := s.payments.FindByProviderRef(
+			ctx,
+			event.Provider,
+			event.ProviderRef,
+			event.MerchantID,
+		)
+		if err != nil {
+			return Result{}, fmt.Errorf(
+				"correlate provider event to payment: %w",
+				err,
+			)
+		}
+
+		event.PaymentID = payment.ID
+	}
+
+	if event.PaymentID == "" {
 		return Result{}, fmt.Errorf(
 			"%w: payment_id",
 			providers.ErrMalformedPayload,
